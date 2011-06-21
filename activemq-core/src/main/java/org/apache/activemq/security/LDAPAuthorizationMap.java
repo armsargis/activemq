@@ -33,6 +33,7 @@ import javax.naming.directory.InitialDirContext;
 import javax.naming.directory.SearchControls;
 import javax.naming.directory.SearchResult;
 
+import org.apache.activemq.advisory.AdvisorySupport;
 import org.apache.activemq.command.ActiveMQDestination;
 import org.apache.activemq.jaas.GroupPrincipal;
 import org.apache.activemq.jaas.LDAPLoginModule;
@@ -79,9 +80,12 @@ public class LDAPAuthorizationMap implements AuthorizationMap {
 
     private MessageFormat topicSearchMatchingFormat;
     private MessageFormat queueSearchMatchingFormat;
+    private String advisorySearchBase = "uid=ActiveMQ.Advisory,ou=topics,ou=destinations,o=ActiveMQ,dc=example,dc=com";
+    private String tempSearchBase = "uid=ActiveMQ.Temp,ou=topics,ou=destinations,o=ActiveMQ,dc=example,dc=com";
 
     private boolean topicSearchSubtreeBool = true;
     private boolean queueSearchSubtreeBool = true;
+    private boolean useAdvisorySearchBase = true;
 
     private String adminBase;
     private String adminAttribute;
@@ -101,6 +105,7 @@ public class LDAPAuthorizationMap implements AuthorizationMap {
 
         topicSearchMatchingFormat = new MessageFormat("uid={0},ou=topics,ou=destinations,o=ActiveMQ,dc=example,dc=com");
         queueSearchMatchingFormat = new MessageFormat("uid={0},ou=queues,ou=destinations,o=ActiveMQ,dc=example,dc=com");
+
 
         adminBase = "(cn=admin)";
         adminAttribute = "uniqueMember";
@@ -136,29 +141,59 @@ public class LDAPAuthorizationMap implements AuthorizationMap {
     }
 
     public Set<GroupPrincipal> getTempDestinationAdminACLs() {
-        // TODO insert implementation
-        return null;
+        try {
+            context = open();
+        } catch (NamingException e) {
+            LOG.error(e.toString());
+            return new HashSet<GroupPrincipal>();
+        }
+        SearchControls constraints = new SearchControls();
+        constraints.setReturningAttributes(new String[] {adminAttribute});
+        return getACLs(tempSearchBase, constraints, adminBase, adminAttribute);
     }
 
     public Set<GroupPrincipal> getTempDestinationReadACLs() {
-        // TODO insert implementation
-        return null;
+        try {
+            context = open();
+        } catch (NamingException e) {
+            LOG.error(e.toString());
+            return new HashSet<GroupPrincipal>();
+        }
+        SearchControls constraints = new SearchControls();
+        constraints.setReturningAttributes(new String[] {readAttribute});
+        return getACLs(tempSearchBase, constraints, readBase, readAttribute);
     }
 
     public Set<GroupPrincipal> getTempDestinationWriteACLs() {
-        // TODO insert implementation
-        return null;
+        try {
+            context = open();
+        } catch (NamingException e) {
+            LOG.error(e.toString());
+            return new HashSet<GroupPrincipal>();
+        }
+        SearchControls constraints = new SearchControls();
+        constraints.setReturningAttributes(new String[] {writeAttribute});
+        return getACLs(tempSearchBase, constraints, writeBase, writeAttribute);
     }
 
     public Set<GroupPrincipal> getAdminACLs(ActiveMQDestination destination) {
+        if (destination.isComposite()) {
+            return getCompositeACLs(destination, adminBase, adminAttribute);
+        }
         return getACLs(destination, adminBase, adminAttribute);
     }
 
     public Set<GroupPrincipal> getReadACLs(ActiveMQDestination destination) {
+        if (destination.isComposite()) {
+            return getCompositeACLs(destination, readBase, readAttribute);
+        }
         return getACLs(destination, readBase, readAttribute);
     }
 
     public Set<GroupPrincipal> getWriteACLs(ActiveMQDestination destination) {
+        if (destination.isComposite()) {
+            return getCompositeACLs(destination, writeBase, writeAttribute);
+        }
         return getACLs(destination, writeBase, writeAttribute);
     }
 
@@ -301,6 +336,39 @@ public class LDAPAuthorizationMap implements AuthorizationMap {
         this.writeBase = writeBase;
     }
 
+    public boolean isUseAdvisorySearchBase() {
+        return useAdvisorySearchBase;
+    }
+
+    public void setUseAdvisorySearchBase(boolean useAdvisorySearchBase) {
+        this.useAdvisorySearchBase = useAdvisorySearchBase;
+    }
+
+    public String getAdvisorySearchBase() {
+        return advisorySearchBase;
+    }
+
+    public void setAdvisorySearchBase(String advisorySearchBase) {
+        this.advisorySearchBase = advisorySearchBase;
+    }
+
+    public String getTempSearchBase() {
+        return tempSearchBase;
+    }
+
+    public void setTempSearchBase(String tempSearchBase) {
+        this.tempSearchBase = tempSearchBase;
+    }
+
+    protected Set<GroupPrincipal> getCompositeACLs(ActiveMQDestination destination, String roleBase, String roleAttribute) {
+        ActiveMQDestination[] dests = destination.getCompositeDestinations();
+        Set<GroupPrincipal> acls = new HashSet<GroupPrincipal>();
+        for (ActiveMQDestination dest : dests) {
+            acls.addAll(getACLs(dest, roleBase, roleAttribute));
+        }
+        return acls;
+    }
+
     // Implementation methods
     // -------------------------------------------------------------------------
     protected Set<GroupPrincipal> getACLs(ActiveMQDestination destination, String roleBase, String roleAttribute) {
@@ -311,33 +379,37 @@ public class LDAPAuthorizationMap implements AuthorizationMap {
             return new HashSet<GroupPrincipal>();
         }
 
-        // if ((destination.getDestinationType() &
-        // (ActiveMQDestination.QUEUE_TYPE | ActiveMQDestination.TOPIC_TYPE)) !=
-        // 0)
-        // return new HashSet();
+
 
         String destinationBase = "";
         SearchControls constraints = new SearchControls();
-
-        if ((destination.getDestinationType() & ActiveMQDestination.QUEUE_TYPE) == ActiveMQDestination.QUEUE_TYPE) {
-            destinationBase = queueSearchMatchingFormat.format(new String[] {destination.getPhysicalName()});
-            if (queueSearchSubtreeBool) {
-                constraints.setSearchScope(SearchControls.SUBTREE_SCOPE);
-            } else {
-                constraints.setSearchScope(SearchControls.ONELEVEL_SCOPE);
+        if (AdvisorySupport.isAdvisoryTopic(destination) && useAdvisorySearchBase) {
+           destinationBase = advisorySearchBase;
+        } else {
+            if ((destination.getDestinationType() & ActiveMQDestination.QUEUE_TYPE) == ActiveMQDestination.QUEUE_TYPE) {
+                destinationBase = queueSearchMatchingFormat.format(new String[]{destination.getPhysicalName()});
+                if (queueSearchSubtreeBool) {
+                    constraints.setSearchScope(SearchControls.SUBTREE_SCOPE);
+                } else {
+                    constraints.setSearchScope(SearchControls.ONELEVEL_SCOPE);
+                }
             }
-        }
-        if ((destination.getDestinationType() & ActiveMQDestination.TOPIC_TYPE) == ActiveMQDestination.TOPIC_TYPE) {
-            destinationBase = topicSearchMatchingFormat.format(new String[] {destination.getPhysicalName()});
-            if (topicSearchSubtreeBool) {
-                constraints.setSearchScope(SearchControls.SUBTREE_SCOPE);
-            } else {
-                constraints.setSearchScope(SearchControls.ONELEVEL_SCOPE);
+            if ((destination.getDestinationType() & ActiveMQDestination.TOPIC_TYPE) == ActiveMQDestination.TOPIC_TYPE) {
+                destinationBase = topicSearchMatchingFormat.format(new String[]{destination.getPhysicalName()});
+                if (topicSearchSubtreeBool) {
+                    constraints.setSearchScope(SearchControls.SUBTREE_SCOPE);
+                } else {
+                    constraints.setSearchScope(SearchControls.ONELEVEL_SCOPE);
+                }
             }
         }
 
         constraints.setReturningAttributes(new String[] {roleAttribute});
 
+        return getACLs(destinationBase, constraints, roleBase, roleAttribute);
+    }
+
+    protected Set<GroupPrincipal> getACLs(String destinationBase, SearchControls constraints, String roleBase, String roleAttribute) {
         try {
             Set<GroupPrincipal> roles = new HashSet<GroupPrincipal>();
             Set<String> acls = new HashSet<String>();
@@ -352,7 +424,8 @@ public class LDAPAuthorizationMap implements AuthorizationMap {
             }
             for (Iterator<String> iter = acls.iterator(); iter.hasNext();) {
                 String roleName = iter.next();
-                roles.add(new GroupPrincipal(roleName));
+                String[] components = roleName.split("=", 2);
+                roles.add(new GroupPrincipal(components[components.length - 1]));
             }
             return roles;
         } catch (NamingException e) {

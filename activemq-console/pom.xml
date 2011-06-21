@@ -22,7 +22,7 @@
   <parent>
     <groupId>org.apache.activemq</groupId>
     <artifactId>activemq-parent</artifactId>
-    <version>5.5-SNAPSHOT</version>
+    <version>5.6-SNAPSHOT</version>
   </parent>
 
   <artifactId>activemq-console</artifactId>
@@ -37,6 +37,7 @@
       sun.management*;resolution:=optional,
       org.josql*;resolution:=optional,
       org.apache.velocity*;resolution:=optional,
+      org.apache.commons.deamon*;resolution:=optional;
       *
     </activemq.osgi.import.pkg>
     <activemq.osgi.export>
@@ -49,7 +50,7 @@
     <repository>
       <id>com.fusesource.m2</id>
       <name>Fusesource Release Repository</name>
-      <url>http://repo.fusesource.com/maven2</url>
+      <url>http://repo.fusesource.com/nexus/content/groups/public/</url>
       <snapshots>
         <enabled>false</enabled>
       </snapshots>
@@ -122,10 +123,6 @@
       <groupId>org.jasypt</groupId>
       <artifactId>jasypt</artifactId>
     </dependency>
-    <dependency>
-      <groupId>com.ibm.icu</groupId>
-      <artifactId>icu4j</artifactId>
-    </dependency> 
     
     <dependency>
       <groupId>commons-daemon</groupId>

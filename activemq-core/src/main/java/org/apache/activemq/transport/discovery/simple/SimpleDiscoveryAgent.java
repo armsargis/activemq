@@ -18,18 +18,12 @@ package org.apache.activemq.transport.discovery.simple;
 
 import java.io.IOException;
 import java.net.URI;
-import java.util.Map;
-import java.util.concurrent.SynchronousQueue;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.activemq.command.DiscoveryEvent;
 import org.apache.activemq.thread.DefaultThreadPools;
 import org.apache.activemq.transport.discovery.DiscoveryAgent;
 import org.apache.activemq.transport.discovery.DiscoveryListener;
-import org.apache.activemq.util.MDCHelper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -112,11 +106,8 @@ public class SimpleDiscoveryAgent implements DiscoveryAgent {
         if (event.failed.compareAndSet(false, true)) {
 
             listener.onServiceRemove(event);
-            final Map context = MDCHelper.getCopyOfContextMap();
             DefaultThreadPools.getDefaultTaskRunnerFactory().execute(new Runnable() {
                 public void run() {
-
-                    MDCHelper.setContextMap(context);
 
                     // We detect a failed connection attempt because the service
                     // fails right
@@ -127,19 +118,21 @@ public class SimpleDiscoveryAgent implements DiscoveryAgent {
                         event.connectFailures++;
 
                         if (maxReconnectAttempts > 0 && event.connectFailures >= maxReconnectAttempts) {
-                            LOG.debug("Reconnect attempts exceeded "+maxReconnectAttempts+" tries.  Reconnecting has been disabled.");
+                            LOG.warn("Reconnect attempts exceeded "+maxReconnectAttempts+" tries.  Reconnecting has been disabled.");
                             return;
                         }
 
                         synchronized (sleepMutex) {
                             try {
                                 if (!running.get()) {
+                                    LOG.debug("Reconnecting disabled: stopped");
                                     return;
                                 }
 
                                 LOG.debug("Waiting "+event.reconnectDelay+" ms before attempting to reconnect.");
                                 sleepMutex.wait(event.reconnectDelay);
                             } catch (InterruptedException ie) {
+                                LOG.debug("Reconnecting disabled: " + ie);
                                 Thread.currentThread().interrupt();
                                 return;
                             }
@@ -161,6 +154,7 @@ public class SimpleDiscoveryAgent implements DiscoveryAgent {
                     }
 
                     if (!running.get()) {
+                        LOG.debug("Reconnecting disabled: stopped");
                         return;
                     }
 

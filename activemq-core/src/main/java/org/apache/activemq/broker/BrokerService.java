@@ -198,6 +198,7 @@ public class BrokerService implements Service {
     private int schedulePeriodForDestinationPurge=5000;
     private BrokerContext brokerContext;
     private boolean networkConnectorStartAsync = false;
+    private boolean allowTempAutoCreationOnSend;
 
 	static {
         String localHostName = "localhost";
@@ -297,10 +298,6 @@ public class BrokerService implements Service {
      * @throws Exception
      */
     public NetworkConnector addNetworkConnector(URI discoveryAddress) throws Exception {
-        if (!isAdvisorySupport()) {
-            throw new javax.jms.IllegalStateException(
-                    "Networks require advisory messages to function - advisories are currently disabled");
-        }
         NetworkConnector connector = new DiscoveryNetworkConnector(discoveryAddress);
         return addNetworkConnector(connector);
     }
@@ -474,7 +471,7 @@ public class BrokerService implements Service {
             return;
         }
 
-        MDC.put("broker", brokerName);
+        MDC.put("activemq.broker", brokerName);
 
         try {
         	if (systemExitOnShutdown && useShutdownHook) {
@@ -543,7 +540,7 @@ public class BrokerService implements Service {
             }
             throw e;
         } finally {
-            MDC.remove("broker");
+            MDC.remove("activemq.broker");
         }
     }
 
@@ -558,7 +555,7 @@ public class BrokerService implements Service {
             return;
         }
 
-        MDC.put("broker", brokerName);
+        MDC.put("activemq.broker", brokerName);
 
         if (systemExitOnShutdown) {
         	new Thread() {
@@ -648,7 +645,7 @@ public class BrokerService implements Service {
             }
         }
 
-        MDC.remove("broker");
+        MDC.remove("activemq.broker");
 
         stopper.throwFirstException();
     }
@@ -1106,9 +1103,11 @@ public class BrokerService implements Service {
         for (TransportConnector connector : transportConnectors) {
             try {
                 URI uri = connector.getConnectUri();
-                String scheme = uri.getScheme();
-                if (scheme != null) {
-                    answer.put(scheme.toLowerCase(), uri.toString());
+                if (uri != null) {
+                    String scheme = uri.getScheme();
+                    if (scheme != null) {
+                        answer.put(scheme.toLowerCase(), uri.toString());
+                    }
                 }
             } catch (Exception e) {
                 LOG.debug("Failed to read URI to build transportURIsAsMap", e);
@@ -1454,6 +1453,7 @@ public class BrokerService implements Service {
                 }
                 this.tempDataStore = new PListStore();
                 this.tempDataStore.setDirectory(getTmpDataDirectory());
+                configureService(tempDataStore);
                 this.tempDataStore.start();
             } catch (Exception e) {
                 throw new RuntimeException(e);
@@ -1468,6 +1468,14 @@ public class BrokerService implements Service {
      */
     public void setTempDataStore(PListStore tempDataStore) {
         this.tempDataStore = tempDataStore;
+        configureService(tempDataStore);
+        try {
+            tempDataStore.start();
+        } catch (Exception e) {
+            RuntimeException exception = new RuntimeException("Failed to start provided temp data store: " + tempDataStore, e);
+            LOG.error(exception.getLocalizedMessage(), e);
+            throw exception;
+        }
     }
 
     public int getPersistenceThreadPriority() {
@@ -1639,7 +1647,7 @@ public class BrokerService implements Service {
         }
     }
 
-    protected void stopAllConnectors(ServiceStopper stopper) {
+    public void stopAllConnectors(ServiceStopper stopper) {
         for (Iterator<NetworkConnector> iter = getNetworkConnectors().iterator(); iter.hasNext();) {
             NetworkConnector connector = iter.next();
             unregisterNetworkConnectorMBean(connector);
@@ -1837,6 +1845,7 @@ public class BrokerService implements Service {
         regionBroker.setKeepDurableSubsActive(keepDurableSubsActive);
         regionBroker.setBrokerName(getBrokerName());
         regionBroker.getDestinationStatistics().setEnabled(enableStatistics);
+        regionBroker.setAllowTempAutoCreationOnSend(isAllowTempAutoCreationOnSend());
         if (brokerId != null) {
             regionBroker.setBrokerId(brokerId);
         }
@@ -2063,7 +2072,7 @@ public class BrokerService implements Service {
      * 
      * @throws Exception
      */
-    protected void startAllConnectors() throws Exception {
+    public void startAllConnectors() throws Exception {
         if (!isSlave()) {
             Set<ActiveMQDestination> durableDestinations = getBroker().getDurableDestinations();
             List<TransportConnector> al = new ArrayList<TransportConnector>();
@@ -2111,11 +2120,9 @@ public class BrokerService implements Service {
                         connector.setBrokerURL(getDefaultSocketURIString());
                     }
                     if (networkConnectorStartExecutor != null) {
-                        final Map context = MDCHelper.getCopyOfContextMap();
                         networkConnectorStartExecutor.execute(new Runnable() {
                             public void run() {
                                 try {
-                                    MDCHelper.setContextMap(context);
                                     LOG.info("Async start of " + connector);
                                     connector.start();
                                 } catch(Exception e) {
@@ -2231,7 +2238,7 @@ public class BrokerService implements Service {
         return this.executor;
     }
     
-    protected synchronized Scheduler getScheduler() {
+    public synchronized Scheduler getScheduler() {
         if (this.scheduler==null) {
             this.scheduler = new Scheduler("ActiveMQ Broker["+getBrokerName()+"] Scheduler");
             try {
@@ -2330,10 +2337,20 @@ public class BrokerService implements Service {
     public void setPassiveSlave(boolean passiveSlave) {
         this.passiveSlave = passiveSlave;
     }
-    
+
+    /**
+     * override the Default IOException handler, called when persistence adapter
+     * has experiences File or JDBC I/O Exceptions
+     *
+     * @param ioExceptionHandler
+     */
     public void setIoExceptionHandler(IOExceptionHandler ioExceptionHandler) {
-        ioExceptionHandler.setBrokerService(this);
+        configureService(ioExceptionHandler);
         this.ioExceptionHandler = ioExceptionHandler;
+    }
+
+    public IOExceptionHandler getIoExceptionHandler() {
+        return ioExceptionHandler;
     }
 
     /**
@@ -2405,5 +2422,21 @@ public class BrokerService implements Service {
 
     public void setNetworkConnectorStartAsync(boolean networkConnectorStartAsync) {
         this.networkConnectorStartAsync = networkConnectorStartAsync;
+    }
+
+    public boolean isAllowTempAutoCreationOnSend() {
+        return allowTempAutoCreationOnSend;
+    }
+
+    /**
+     * enable if temp destinations need to be propagated through a network when
+     * advisorySupport==false. This is used in conjunction with the policy
+     * gcInactiveDestinations for matching temps so they can get removed
+     * when inactive
+     *
+     * @param allowTempAutoCreationOnSend
+     */
+    public void setAllowTempAutoCreationOnSend(boolean allowTempAutoCreationOnSend) {
+        this.allowTempAutoCreationOnSend = allowTempAutoCreationOnSend;
     }
 }

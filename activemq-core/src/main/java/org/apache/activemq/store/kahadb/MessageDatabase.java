@@ -38,6 +38,7 @@ import org.apache.activemq.broker.BrokerService;
 import org.apache.activemq.broker.BrokerServiceAware;
 import org.apache.activemq.command.ConnectionId;
 import org.apache.activemq.command.LocalTransactionId;
+import org.apache.activemq.command.MessageAck;
 import org.apache.activemq.command.MessageId;
 import org.apache.activemq.command.SubscriptionInfo;
 import org.apache.activemq.command.TransactionId;
@@ -61,6 +62,7 @@ import org.apache.activemq.util.Callback;
 import org.apache.activemq.util.IOHelper;
 import org.apache.activemq.util.ServiceStopper;
 import org.apache.activemq.util.ServiceSupport;
+import org.apache.kahadb.util.LocationMarshaller;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.kahadb.index.BTreeIndex;
@@ -814,7 +816,12 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
      * @throws IOException
      */
     public JournalCommand<?> load(Location location) throws IOException {
+        long start = System.currentTimeMillis();
         ByteSequence data = journal.read(location);
+        long end = System.currentTimeMillis();
+        if( LOG_SLOW_ACCESS_TIME>0 && end-start > LOG_SLOW_ACCESS_TIME) {
+            LOG.info("Slow KahaDB access: Journal read took: "+(end-start)+" ms");
+        }
         DataByteArrayInputStream is = new DataByteArrayInputStream(data);
         byte readByte = is.readByte();
         KahaEntryType type = KahaEntryType.valueOf(readByte);
@@ -1470,34 +1477,6 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         }
     }
 
-    static class LocationMarshaller implements Marshaller<Location> {
-        final static LocationMarshaller INSTANCE = new LocationMarshaller();
-
-        public Location readPayload(DataInput dataIn) throws IOException {
-            Location rc = new Location();
-            rc.setDataFileId(dataIn.readInt());
-            rc.setOffset(dataIn.readInt());
-            return rc;
-        }
-
-        public void writePayload(Location object, DataOutput dataOut) throws IOException {
-            dataOut.writeInt(object.getDataFileId());
-            dataOut.writeInt(object.getOffset());
-        }
-
-        public int getFixedSize() {
-            return 8;
-        }
-
-        public Location deepCopy(Location source) {
-            return new Location(source);
-        }
-
-        public boolean isDeepCopySupported() {
-            return true;
-        }
-    }
-
     static class KahaSubscriptionCommandMarshaller extends VariableMarshaller<KahaSubscriptionCommand> {
         final static KahaSubscriptionCommandMarshaller INSTANCE = new KahaSubscriptionCommandMarshaller();
 
@@ -1567,7 +1546,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         // Figure out the next key using the last entry in the destination.
         rc.orderIndex.configureLast(tx);
 
-        rc.locationIndex.setKeyMarshaller(LocationMarshaller.INSTANCE);
+        rc.locationIndex.setKeyMarshaller(org.apache.kahadb.util.LocationMarshaller.INSTANCE);
         rc.locationIndex.setValueMarshaller(LongMarshaller.INSTANCE);
         rc.locationIndex.load(tx);
 
@@ -1719,7 +1698,35 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
     // /////////////////////////////////////////////////////////////////
     protected final LinkedHashMap<TransactionId, List<Operation>> inflightTransactions = new LinkedHashMap<TransactionId, List<Operation>>();
     protected final LinkedHashMap<TransactionId, List<Operation>> preparedTransactions = new LinkedHashMap<TransactionId, List<Operation>>();
- 
+    protected final Set<String> ackedAndPrepared = new HashSet<String>();
+
+    // messages that have prepared (pending) acks cannot be redispatched unless the outcome is rollback,
+    // till then they are skipped by the store.
+    // 'at most once' XA guarantee
+    public void trackRecoveredAcks(ArrayList<MessageAck> acks) {
+        this.indexLock.writeLock().lock();
+        try {
+            for (MessageAck ack : acks) {
+                ackedAndPrepared.add(ack.getLastMessageId().toString());
+            }
+        } finally {
+            this.indexLock.writeLock().unlock();
+        }
+    }
+
+    public void forgetRecoveredAcks(ArrayList<MessageAck> acks) throws IOException {
+        if (acks != null) {
+            this.indexLock.writeLock().lock();
+            try {
+                for (MessageAck ack : acks) {
+                    ackedAndPrepared.remove(ack.getLastMessageId().toString());
+                }
+            } finally {
+                this.indexLock.writeLock().unlock();
+            }
+        }
+    }
+
     private List<Operation> getInflightTx(KahaTransactionInfo info, Location location) {
         TransactionId key = key(info);
         List<Operation> tx;

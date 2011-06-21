@@ -17,6 +17,7 @@
 package org.apache.activemq.tool;
 
 import java.util.Arrays;
+import java.util.Set;
 
 import javax.jms.ConnectionFactory;
 import javax.jms.DeliveryMode;
@@ -96,6 +97,7 @@ public class JmsProducerClient extends AbstractJmsMeasurableClient {
                             getJmsProducer().send(dest[j], getJmsTextMessage());
                             incThroughput();
                             sleep();
+                            commitTxIfNecessary();
                         }
                     }
                     // Send to only one actual destination
@@ -104,6 +106,7 @@ public class JmsProducerClient extends AbstractJmsMeasurableClient {
                         getJmsProducer().send(getJmsTextMessage());
                         incThroughput();
                         sleep();
+                        commitTxIfNecessary();
                     }
                 }
 
@@ -118,6 +121,7 @@ public class JmsProducerClient extends AbstractJmsMeasurableClient {
                             getJmsProducer().send(dest[j], createJmsTextMessage("Text Message [" + i + "]"));
                             incThroughput();
                             sleep();
+                            commitTxIfNecessary();
                         }
                     }
 
@@ -127,6 +131,7 @@ public class JmsProducerClient extends AbstractJmsMeasurableClient {
                         getJmsProducer().send(createJmsTextMessage("Text Message [" + i + "]"));
                         incThroughput();
                         sleep();
+                        commitTxIfNecessary();
                     }
                 }
             }
@@ -167,6 +172,7 @@ public class JmsProducerClient extends AbstractJmsMeasurableClient {
                             getJmsProducer().send(dest[j], getJmsTextMessage());
                             incThroughput();
                             sleep();
+                            commitTxIfNecessary();
                         }
                     }
                     // Send to only one actual destination
@@ -175,6 +181,7 @@ public class JmsProducerClient extends AbstractJmsMeasurableClient {
                         getJmsProducer().send(getJmsTextMessage());
                         incThroughput();
                         sleep();
+                        commitTxIfNecessary();
                     }
                 }
 
@@ -190,6 +197,7 @@ public class JmsProducerClient extends AbstractJmsMeasurableClient {
                             getJmsProducer().send(dest[j], createJmsTextMessage("Text Message [" + count++ + "]"));
                             incThroughput();
                             sleep();
+                            commitTxIfNecessary();
                         }
                     }
 
@@ -200,6 +208,7 @@ public class JmsProducerClient extends AbstractJmsMeasurableClient {
                         getJmsProducer().send(createJmsTextMessage("Text Message [" + count++ + "]"));
                         incThroughput();
                         sleep();
+                        commitTxIfNecessary();
                     }
                 }
             }
@@ -248,6 +257,13 @@ public class JmsProducerClient extends AbstractJmsMeasurableClient {
 
     public TextMessage createJmsTextMessage(int size) throws JMSException {
         jmsTextMessage = getSession().createTextMessage(buildText("", size));
+        
+        // support for adding message headers
+        Set<String> headerKeys = this.client.getHeaderKeys();
+        for (String key : headerKeys) {
+        	jmsTextMessage.setObjectProperty(key, this.client.getHeaderValue(key));
+        }
+        
         return jmsTextMessage;
     }
 

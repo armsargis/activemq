@@ -38,7 +38,9 @@ import org.apache.activemq.wireformat.WireFormat;
  */
 public final class OpenWireFormat implements WireFormat {
 
-    public static final int DEFAULT_VERSION = CommandTypes.PROTOCOL_VERSION;
+    public static final int DEFAULT_VERSION = CommandTypes.PROTOCOL_STORE_VERSION;
+    public static final int DEFAULT_WIRE_VERSION = CommandTypes.PROTOCOL_VERSION;
+    public static final int DEFAULT_MAX_FRAME_SIZE = 100 * 1024 * 1024; //100 MB
 
     static final byte NULL_TYPE = CommandTypes.NULL;
     private static final int MARSHAL_CACHE_SIZE = Short.MAX_VALUE / 2;
@@ -51,6 +53,7 @@ public final class OpenWireFormat implements WireFormat {
     private boolean cacheEnabled;
     private boolean tightEncodingEnabled;
     private boolean sizePrefixDisabled;
+    private long maxFrameSize = DEFAULT_MAX_FRAME_SIZE;
 
     // The following fields are used for value caching
     private short nextMarshallCacheIndex;
@@ -102,7 +105,7 @@ public final class OpenWireFormat implements WireFormat {
 
     public String toString() {
         return "OpenWireFormat{version=" + version + ", cacheEnabled=" + cacheEnabled + ", stackTraceEnabled=" + stackTraceEnabled + ", tightEncodingEnabled="
-               + tightEncodingEnabled + ", sizePrefixDisabled=" + sizePrefixDisabled + "}";
+               + tightEncodingEnabled + ", sizePrefixDisabled=" + sizePrefixDisabled +  ", maxFrameSize=" + maxFrameSize + "}";
         // return "OpenWireFormat{id="+id+",
         // tightEncodingEnabled="+tightEncodingEnabled+"}";
     }
@@ -199,6 +202,10 @@ public final class OpenWireFormat implements WireFormat {
                 // throw new IOException("Packet size does not match marshaled
                 // size");
             }
+
+            if (size > maxFrameSize) {
+                throw new IOException("Frame size of " + (size / (1024 * 1024)) + " MB larger than max allowed " + (maxFrameSize / (1024 * 1024)) + " MB");
+            }
         }
 
         Object command = doUnmarshal(bytesIn);
@@ -266,7 +273,10 @@ public final class OpenWireFormat implements WireFormat {
     public Object unmarshal(DataInput dis) throws IOException {
         DataInput dataIn = dis;
         if (!sizePrefixDisabled) {
-            dis.readInt();
+            int size = dis.readInt();
+            if (size > maxFrameSize) {
+                throw new IOException("Frame size of " + (size / (1024 * 1024)) + " MB larger than max allowed " + (maxFrameSize / (1024 * 1024)) + " MB");
+            }
             // int size = dis.readInt();
             // byte[] data = new byte[size];
             // dis.readFully(data);
@@ -590,6 +600,14 @@ public final class OpenWireFormat implements WireFormat {
         return preferedWireFormatInfo;
     }
 
+    public long getMaxFrameSize() {
+        return maxFrameSize;
+    }
+
+    public void setMaxFrameSize(long maxFrameSize) {
+        this.maxFrameSize = maxFrameSize;
+    }
+
     public void renegotiateWireFormat(WireFormatInfo info) throws IOException {
 
         if (preferedWireFormatInfo == null) {
@@ -598,6 +616,9 @@ public final class OpenWireFormat implements WireFormat {
 
         this.setVersion(min(preferedWireFormatInfo.getVersion(), info.getVersion()));
         info.setVersion(this.getVersion());
+
+        this.setMaxFrameSize(min(preferedWireFormatInfo.getMaxFrameSize(), info.getMaxFrameSize()));
+        info.setMaxFrameSize(this.getMaxFrameSize());
 
         this.stackTraceEnabled = info.isStackTraceEnabled() && preferedWireFormatInfo.isStackTraceEnabled();
         info.setStackTraceEnabled(this.stackTraceEnabled);
@@ -641,6 +662,13 @@ public final class OpenWireFormat implements WireFormat {
     }
 
     protected int min(int version1, int version2) {
+        if (version1 < version2 && version1 > 0 || version2 <= 0) {
+            return version1;
+        }
+        return version2;
+    }
+
+    protected long min(long version1, long version2) {
         if (version1 < version2 && version1 > 0 || version2 <= 0) {
             return version1;
         }

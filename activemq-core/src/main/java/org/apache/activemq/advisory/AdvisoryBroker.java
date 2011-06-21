@@ -251,8 +251,8 @@ public class AdvisoryBroker extends BrokerFilter {
     }
 
     @Override
-    public void messageExpired(ConnectionContext context, MessageReference messageReference) {
-        super.messageExpired(context, messageReference);
+    public void messageExpired(ConnectionContext context, MessageReference messageReference, Subscription subscription) {
+        super.messageExpired(context, messageReference, subscription);
         try {
             if(!messageReference.isAdvisory()) {
                 ActiveMQTopic topic = AdvisorySupport.getExpiredMessageTopic(messageReference.getMessage().getDestination());
@@ -263,7 +263,7 @@ public class AdvisoryBroker extends BrokerFilter {
                 fireAdvisory(context, topic, payload, null, advisoryMessage);
             }
         } catch (Exception e) {
-            LOG.warn("Failed to fire message expired advisory");
+            handleFireFailure("expired", e);
         }
     }
     
@@ -278,7 +278,7 @@ public class AdvisoryBroker extends BrokerFilter {
                 fireAdvisory(context, topic,payload);
             }
         } catch (Exception e) {
-            LOG.warn("Failed to fire message consumed advisory");
+            handleFireFailure("consumed", e);
         }
     }
     
@@ -293,7 +293,7 @@ public class AdvisoryBroker extends BrokerFilter {
                 fireAdvisory(context, topic,payload);
             }
         } catch (Exception e) {
-            LOG.warn("Failed to fire message delivered advisory");
+            handleFireFailure("delivered", e);
         }
     }
     
@@ -313,7 +313,7 @@ public class AdvisoryBroker extends BrokerFilter {
                 fireAdvisory(context, topic, payload, null, advisoryMessage);
             }
         } catch (Exception e) {
-            LOG.warn("Failed to fire message discarded advisory");
+            handleFireFailure("discarded", e);
         }
     }
     
@@ -326,7 +326,7 @@ public class AdvisoryBroker extends BrokerFilter {
             advisoryMessage.setStringProperty(AdvisorySupport.MSG_PROPERTY_CONSUMER_ID, subs.getConsumerInfo().getConsumerId().toString());
             fireAdvisory(context, topic, subs.getConsumerInfo(), null, advisoryMessage);
         } catch (Exception e) {
-            LOG.warn("Failed to fire message slow consumer advisory");
+            handleFireFailure("slow consumer", e);
         }
     }
     
@@ -339,7 +339,7 @@ public class AdvisoryBroker extends BrokerFilter {
             advisoryMessage.setStringProperty(AdvisorySupport.MSG_PROPERTY_PRODUCER_ID, producerInfo.getProducerId().toString());
             fireAdvisory(context, topic, producerInfo, null, advisoryMessage);
         } catch (Exception e) {
-            LOG.warn("Failed to fire message fast producer advisory");
+            handleFireFailure("fast producer", e);
         }
     }
     
@@ -355,7 +355,7 @@ public class AdvisoryBroker extends BrokerFilter {
                 fireAdvisory(context, topic, null, null, advisoryMessage);
 
             } catch (Exception e) {
-                LOG.warn("Failed to fire message is full advisory");
+                handleFireFailure("is full", e);
             }
         }
     }
@@ -371,13 +371,14 @@ public class AdvisoryBroker extends BrokerFilter {
             context.setBroker(getBrokerService().getBroker());
             fireAdvisory(context, topic,null,null,advisoryMessage);
         } catch (Exception e) {
-            LOG.warn("Failed to fire message master broker advisory");
+            handleFireFailure("now master broker", e);
         }
     }
     
     @Override
-    public void sendToDeadLetterQueue(ConnectionContext context,MessageReference messageReference){
-        super.sendToDeadLetterQueue(context, messageReference);
+    public void sendToDeadLetterQueue(ConnectionContext context, MessageReference messageReference,
+                                      Subscription subscription){
+        super.sendToDeadLetterQueue(context, messageReference, subscription);
         try {
             if(!messageReference.isAdvisory()) {
                 ActiveMQTopic topic = AdvisorySupport.getMessageDLQdAdvisoryTopic(messageReference.getMessage().getDestination());
@@ -386,17 +387,18 @@ public class AdvisoryBroker extends BrokerFilter {
                 fireAdvisory(context, topic,payload);
             }
         } catch (Exception e) {
-            LOG.warn("Failed to fire message consumed advisory");
+            handleFireFailure("add to DLQ", e);
         } 
     }
 
     @Override
-    public void networkBridgeStarted(BrokerInfo brokerInfo, boolean createdByDuplex) {
+    public void networkBridgeStarted(BrokerInfo brokerInfo, boolean createdByDuplex, String remoteIp) {
         try {
          if (brokerInfo != null) {
              ActiveMQMessage advisoryMessage = new ActiveMQMessage();
              advisoryMessage.setBooleanProperty("started", true);
              advisoryMessage.setBooleanProperty("createdByDuplex", createdByDuplex);
+             advisoryMessage.setStringProperty("remoteIp", remoteIp);
 
              ActiveMQTopic topic = AdvisorySupport.getNetworkBridgeAdvisoryTopic();
 
@@ -406,7 +408,7 @@ public class AdvisoryBroker extends BrokerFilter {
              fireAdvisory(context, topic, brokerInfo, null, advisoryMessage);
          }
         } catch (Exception e) {
-            LOG.warn("Failed to fire network bridge advisory");
+            handleFireFailure("network bridge started", e);
         }
     }
 
@@ -425,7 +427,14 @@ public class AdvisoryBroker extends BrokerFilter {
              fireAdvisory(context, topic, brokerInfo, null, advisoryMessage);
          }
         } catch (Exception e) {
-            LOG.warn("Failed to fire network bridge advisory");
+            handleFireFailure("network bridge stopped", e);
+        }
+    }
+
+    private void handleFireFailure(String message, Throwable cause) {
+        LOG.warn("Failed to fire "  + message + " advisory, reason: " + cause);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug(message + " detail", cause);
         }
     }
 

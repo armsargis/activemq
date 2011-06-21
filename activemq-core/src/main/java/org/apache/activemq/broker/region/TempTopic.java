@@ -68,5 +68,4 @@ public class TempTopic  extends Topic  implements Task{
     
     public void initialize() {
     }
-   
 }

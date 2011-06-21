@@ -26,10 +26,10 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
-import javax.transaction.xa.XAException;
 import org.apache.activemq.broker.ConnectionContext;
 import org.apache.activemq.command.Message;
 import org.apache.activemq.command.MessageAck;
+import org.apache.activemq.command.MessageId;
 import org.apache.activemq.command.TransactionId;
 import org.apache.activemq.command.XATransactionId;
 import org.apache.activemq.openwire.OpenWireFormat;
@@ -194,6 +194,14 @@ public class KahaDBTransactionStore implements TransactionStore {
             public void removeAsyncMessage(ConnectionContext context, MessageAck ack) throws IOException {
                 KahaDBTransactionStore.this.removeAsyncMessage(context, getDelegate(), ack);
             }
+
+            @Override
+            public void acknowledge(ConnectionContext context, String clientId, String subscriptionName,
+                            MessageId messageId, MessageAck ack) throws IOException {
+                KahaDBTransactionStore.this.acknowledge(context, (TopicMessageStore)getDelegate(), clientId,
+                        subscriptionName, messageId, ack);
+            }
+
         };
     }
 
@@ -216,9 +224,6 @@ public class KahaDBTransactionStore implements TransactionStore {
         return tx;
     }
 
-    /**
-     * @see org.apache.activemq.store.TransactionStore#commit(org.apache.activemq.service.Transaction)
-     */
     public void commit(TransactionId txid, boolean wasPrepared, Runnable preCommit, Runnable postCommit)
             throws IOException {
         if (txid != null) {
@@ -262,6 +267,7 @@ public class KahaDBTransactionStore implements TransactionStore {
                 // ensure message order w.r.t to cursor and store for setBatch()
                 synchronized (this) {
                     theStore.store(new KahaCommitCommand().setTransactionInfo(info), true, preCommit, postCommit);
+                    forgetRecoveredAcks(txid);
                 }
             }
         }else {
@@ -277,8 +283,16 @@ public class KahaDBTransactionStore implements TransactionStore {
         if (txid.isXATransaction() || theStore.isConcurrentStoreAndDispatchTransactions() == false) {
             KahaTransactionInfo info = getTransactionInfo(txid);
             theStore.store(new KahaRollbackCommand().setTransactionInfo(info), false, null, null);
+            forgetRecoveredAcks(txid);
         } else {
             inflightTransactions.remove(txid);
+        }
+    }
+
+    protected void forgetRecoveredAcks(TransactionId txid) throws IOException {
+        if (txid.isXATransaction()) {
+            XATransactionId xaTid = ((XATransactionId) txid);
+            theStore.forgetRecoveredAcks(xaTid.getPreparedAcks());
         }
     }
 
@@ -289,8 +303,6 @@ public class KahaDBTransactionStore implements TransactionStore {
     }
 
     public synchronized void recover(TransactionRecoveryListener listener) throws IOException {
-        // All the inflight transactions get rolled back..
-        // inflightTransactions.clear();
         for (Map.Entry<TransactionId, List<Operation>> entry : theStore.preparedTransactions.entrySet()) {
             XATransactionId xid = (XATransactionId) entry.getKey();
             ArrayList<Message> messageList = new ArrayList<Message>();
@@ -314,6 +326,8 @@ public class KahaDBTransactionStore implements TransactionStore {
             MessageAck[] acks = new MessageAck[ackList.size()];
             messageList.toArray(addedMessages);
             ackList.toArray(acks);
+            xid.setPreparedAcks(ackList);
+            theStore.trackRecoveredAcks(ackList);
             listener.recover(xid, addedMessages, acks);
         }
     }
@@ -457,6 +471,31 @@ public class KahaDBTransactionStore implements TransactionStore {
             destination.removeAsyncMessage(context, ack);
         }
     }
+
+    final void acknowledge(ConnectionContext context, final TopicMessageStore destination, final String clientId, final String subscriptionName,
+                           final MessageId messageId, final MessageAck ack) throws IOException {
+
+        if (ack.isInTransaction()) {
+            if (ack.getTransactionId().isXATransaction() || theStore.isConcurrentStoreAndDispatchTransactions()== false) {
+                destination.acknowledge(context, clientId, subscriptionName, messageId, ack);
+            } else {
+                Tx tx = getTx(ack.getTransactionId());
+                tx.add(new RemoveMessageCommand(context) {
+                    public MessageAck getMessageAck() {
+                        return ack;
+                    }
+
+                    public Future<Object> run(ConnectionContext ctx) throws IOException {
+                        destination.acknowledge(ctx, clientId, subscriptionName, messageId, ack);
+                        return AbstractMessageStore.FUTURE;
+                    }
+                });
+            }
+        } else {
+            destination.acknowledge(context, clientId, subscriptionName, messageId, ack);
+        }
+    }
+
 
     private KahaTransactionInfo getTransactionInfo(TransactionId txid) {
         return theStore.createTransactionInfo(txid);

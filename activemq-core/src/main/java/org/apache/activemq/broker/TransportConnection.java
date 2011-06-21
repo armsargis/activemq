@@ -17,6 +17,7 @@
 package org.apache.activemq.broker;
 
 import java.io.IOException;
+import java.net.SocketException;
 import java.net.URI;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -81,6 +82,7 @@ import org.apache.activemq.state.ConsumerState;
 import org.apache.activemq.state.ProducerState;
 import org.apache.activemq.state.SessionState;
 import org.apache.activemq.state.TransactionState;
+import org.apache.activemq.thread.DefaultThreadPools;
 import org.apache.activemq.thread.Task;
 import org.apache.activemq.thread.TaskRunner;
 import org.apache.activemq.thread.TaskRunnerFactory;
@@ -95,10 +97,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 
-import static org.apache.activemq.thread.DefaultThreadPools.getDefaultTaskRunnerFactory;
-/**
- * 
- */
 public class TransportConnection implements Connection, Task, CommandVisitor {
     private static final Logger LOG = LoggerFactory.getLogger(TransportConnection.class);
     private static final Logger TRANSPORTLOG = LoggerFactory.getLogger(TransportConnection.class.getName() + ".Transport");
@@ -231,11 +229,20 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
             transportException.set(e);
             if (TRANSPORTLOG.isDebugEnabled()) {
                 TRANSPORTLOG.debug("Transport failed: " + e, e);
-            } else if (TRANSPORTLOG.isInfoEnabled()) {
+            } else if (TRANSPORTLOG.isInfoEnabled() && !expected(e)) {
                 TRANSPORTLOG.info("Transport failed: " + e);
             }
             stopAsync();
         }
+    }
+
+    private boolean expected(IOException e) {
+        return  e instanceof SocketException && isStomp() && e.getMessage().indexOf("reset") != -1;
+    }
+
+    private boolean isStomp() {
+        URI uri = connector.getUri();
+        return uri != null && uri.getScheme() != null && uri.getScheme().indexOf("stomp") != -1;
     }
 
     /**
@@ -301,7 +308,7 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
     }
 
     public Response service(Command command) {
-        MDC.put("connector", connector.getUri().toString());
+        MDC.put("activemq.connector", connector.getUri().toString());
         Response response = null;
         boolean responseRequired = command.isResponseRequired();
         int commandId = command.getCommandId();
@@ -333,7 +340,7 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
             }
             context = null;
         }
-        MDC.remove("connector");
+        MDC.remove("activemq.connector");
         return response;
     }
 
@@ -690,6 +697,9 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
         this.manageable = info.isManageable();
         state.setContext(context);
         state.setConnection(this);
+        if (info.getClientIp() == null) {
+            info.setClientIp(getRemoteAddress());
+        }
        
         try {
             broker.addConnection(context, info);
@@ -946,12 +956,10 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
                 cs.getContext().getStopping().set(true);
             }
             try {
-                final Map context = MDCHelper.getCopyOfContextMap();
-                getDefaultTaskRunnerFactory().execute(new Runnable(){
+                DefaultThreadPools.getDefaultTaskRunnerFactory().execute(new Runnable(){
                     public void run() {
                         serviceLock.writeLock().lock();
                         try {
-                            MDCHelper.setContextMap(context);
                             doStop();
                         } catch (Throwable e) {
                             LOG.debug("Error occured while shutting down a connection to '" + transport.getRemoteAddress()

@@ -18,7 +18,6 @@ package org.apache.activemq.transport.stomp;
 
 import java.io.UnsupportedEncodingException;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
@@ -27,10 +26,11 @@ import org.apache.activemq.command.Command;
 import org.apache.activemq.command.Endpoint;
 import org.apache.activemq.command.Response;
 import org.apache.activemq.state.CommandVisitor;
+import org.apache.activemq.util.MarshallingSupport;
 
 /**
  * Represents all the data in a STOMP frame.
- * 
+ *
  * @author <a href="http://hiramchirino.com">chirino</a>
  */
 public class StompFrame implements Command {
@@ -42,21 +42,21 @@ public class StompFrame implements Command {
     private byte[] content = NO_DATA;
 
     public StompFrame(String command) {
-    	this(command, null, null);
+        this(command, null, null);
     }
-    
+
     public StompFrame(String command, Map<String, String> headers) {
-    	this(command, headers, null);
-    }    
-    
+        this(command, headers, null);
+    }
+
     public StompFrame(String command, Map<String, String> headers, byte[] data) {
         this.action = command;
         if (headers != null)
-        	this.headers = headers;
+            this.headers = headers;
         if (data != null)
-        	this.content = data;
+            this.content = data;
     }
-    
+
     public StompFrame() {
     }
 
@@ -71,13 +71,13 @@ public class StompFrame implements Command {
     public byte[] getContent() {
         return content;
     }
-    
+
     public String getBody() {
-    	try {
-    		return new String(content, "UTF-8");
-    	} catch (UnsupportedEncodingException e) {
-    		return new String(content);
-    	}
+        try {
+            return new String(content, "UTF-8");
+        } catch (UnsupportedEncodingException e) {
+            return new String(content);
+        }
     }
 
     public void setContent(byte[] data) {
@@ -138,7 +138,7 @@ public class StompFrame implements Command {
     public boolean isShutdownInfo() {
         return false;
     }
-    
+
     public boolean isConnectionControl() {
         return false;
     }
@@ -172,6 +172,14 @@ public class StompFrame implements Command {
     }
 
     public String toString() {
+        return format(true);
+    }
+
+    public String format() {
+        return format(false);
+    }
+
+    public String format(boolean forLogging) {
         StringBuffer buffer = new StringBuffer();
         buffer.append(getAction());
         buffer.append("\n");
@@ -180,13 +188,21 @@ public class StompFrame implements Command {
             Map.Entry entry = (Map.Entry)iter.next();
             buffer.append(entry.getKey());
             buffer.append(":");
-            buffer.append(entry.getValue());
+            if (forLogging && entry.getKey().toString().toLowerCase().contains(Stomp.Headers.Connect.PASSCODE)) {
+                buffer.append("*****");
+            } else {
+                buffer.append(entry.getValue());
+            }
             buffer.append("\n");
         }
         buffer.append("\n");
         if (getContent() != null) {
             try {
-                buffer.append(new String(getContent(), "UTF-8"));
+                String contentString = new String(getContent(), "UTF-8");
+                if (forLogging) {
+                    contentString = MarshallingSupport.truncate64(contentString);
+                }
+                buffer.append(contentString);
             } catch (Throwable e) {
                 buffer.append(Arrays.toString(getContent()));
             }

@@ -82,10 +82,14 @@ public class JmsConsumerClient extends AbstractJmsMeasurableClient {
 
             LOG.info("Starting to synchronously receive messages for " + duration + " ms...");
             long endTime = System.currentTimeMillis() + duration;
+
+            int counter = 0;
             while (System.currentTimeMillis() < endTime) {
                 getJmsConsumer().receive();
                 incThroughput();
+                counter++;
                 sleep();
+                commitTxIfNecessary();
             }
         } finally {
             if (client.isDurable() && client.isUnsubscribe()) {
@@ -112,6 +116,7 @@ public class JmsConsumerClient extends AbstractJmsMeasurableClient {
                 incThroughput();
                 recvCount++;
                 sleep();
+                commitTxIfNecessary();
             }
         } finally {
             if (client.isDurable() && client.isUnsubscribe()) {
@@ -132,6 +137,11 @@ public class JmsConsumerClient extends AbstractJmsMeasurableClient {
             public void onMessage(Message msg) {
                 incThroughput();
                 sleep();
+                try {
+                	commitTxIfNecessary();
+                } catch (JMSException ex) {
+                	LOG.error("Error committing transaction: " + ex.getMessage());
+                }
             }
         });
 
@@ -165,6 +175,12 @@ public class JmsConsumerClient extends AbstractJmsMeasurableClient {
                 recvCount.incrementAndGet();
                 synchronized (recvCount) {
                     recvCount.notify();
+                } 
+                
+                try {
+                	commitTxIfNecessary();
+                } catch (JMSException ex) {
+                	LOG.error("Error committing transaction: " + ex.getMessage());
                 }
             }
         });
@@ -193,7 +209,11 @@ public class JmsConsumerClient extends AbstractJmsMeasurableClient {
 
     public MessageConsumer createJmsConsumer() throws JMSException {
         Destination[] dest = createDestination(destIndex, destCount);
-        return createJmsConsumer(dest[0]);
+        
+        if (this.client.getMessageSelector() == null)
+        	return createJmsConsumer(dest[0]);
+        else 
+        	return createJmsConsumer(dest[0], this.client.getMessageSelector(), false);
     }
 
     public MessageConsumer createJmsConsumer(Destination dest) throws JMSException {
@@ -240,6 +260,10 @@ public class JmsConsumerClient extends AbstractJmsMeasurableClient {
         client = (JmsConsumerProperties)clientProps;
     }
     
+    /**
+     * A way to throttle the consumer. Time to sleep is 
+     * configured via recvDelay property. 
+     */
     protected void sleep() {
         if (client.getRecvDelay() > 0) {
         	try {

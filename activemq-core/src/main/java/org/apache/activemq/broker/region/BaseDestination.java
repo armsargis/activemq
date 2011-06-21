@@ -17,6 +17,8 @@
 package org.apache.activemq.broker.region;
 
 import java.io.IOException;
+import java.util.Collection;
+import java.util.List;
 import javax.jms.ResourceAllocationException;
 import org.apache.activemq.advisory.AdvisorySupport;
 import org.apache.activemq.broker.Broker;
@@ -30,8 +32,11 @@ import org.apache.activemq.command.ActiveMQTopic;
 import org.apache.activemq.command.Message;
 import org.apache.activemq.command.MessageDispatchNotification;
 import org.apache.activemq.command.ProducerInfo;
+import org.apache.activemq.filter.NonCachedMessageEvaluationContext;
+import org.apache.activemq.security.SecurityContext;
 import org.apache.activemq.state.ProducerState;
 import org.apache.activemq.store.MessageStore;
+import org.apache.activemq.thread.Scheduler;
 import org.apache.activemq.usage.MemoryUsage;
 import org.apache.activemq.usage.SystemUsage;
 import org.apache.activemq.usage.Usage;
@@ -88,11 +93,13 @@ public abstract class BaseDestination implements Destination {
     private boolean prioritizedMessages;
     private long inactiveTimoutBeforeGC = DEFAULT_INACTIVE_TIMEOUT_BEFORE_GC;
     private boolean gcIfInactive;
+    private boolean gcWithNetworkConsumers;
     private long lastActiveTime=0l;
     private boolean reduceMemoryFootprint = false;
+    protected final Scheduler scheduler;
 
     /**
-     * @param broker
+     * @param brokerService
      * @param store
      * @param destination
      * @param parentStats
@@ -110,6 +117,7 @@ public abstract class BaseDestination implements Destination {
         this.memoryUsage = this.systemUsage.getMemoryUsage();
         this.memoryUsage.setUsagePortion(1.0f);
         this.regionBroker = brokerService.getRegionBroker();
+        this.scheduler = brokerService.getBroker().getScheduler();
     }
 
     /**
@@ -241,8 +249,13 @@ public abstract class BaseDestination implements Destination {
         return store;
     }
 
-    public final boolean isActive() {
-        return destinationStatistics.getConsumers().getCount() != 0 || destinationStatistics.getProducers().getCount() != 0;
+    public boolean isActive() {
+        boolean isActive = destinationStatistics.getConsumers().getCount() != 0 ||
+                           destinationStatistics.getProducers().getCount() != 0;
+        if (isActive && isGcWithNetworkConsumers() && destinationStatistics.getConsumers().getCount() != 0) {
+            isActive = hasRegularConsumers(getConsumers());
+        }
+        return isActive;
     }
 
     public int getMaxPageSize() {
@@ -575,12 +588,12 @@ public abstract class BaseDestination implements Destination {
     
     protected final void waitForSpace(ConnectionContext context, Usage<?> usage, int highWaterMark, String warning) throws IOException, InterruptedException, ResourceAllocationException {
         if (systemUsage.isSendFailIfNoSpace()) {
-            getLog().debug("sendFailIfNoSpace, forcing exception on send: " + warning);
+            getLog().debug("sendFailIfNoSpace, forcing exception on send, usage:  " + usage + ": " + warning);
             throw new ResourceAllocationException(warning);
         }
         if (systemUsage.getSendFailIfNoSpaceAfterTimeout() != 0) {
             if (!usage.waitForSpace(systemUsage.getSendFailIfNoSpaceAfterTimeout(), highWaterMark)) {
-                getLog().debug("sendFailIfNoSpaceAfterTimeout expired, forcing exception on send: " + warning);
+                getLog().debug("sendFailIfNoSpaceAfterTimeout expired, forcing exception on send, usage: " + usage + ": " + warning);
                 throw new ResourceAllocationException(warning);
             }
         } else {
@@ -593,7 +606,7 @@ public abstract class BaseDestination implements Destination {
     
                 long now = System.currentTimeMillis();
                 if (now >= nextWarn) {
-                    getLog().info(warning + " (blocking for: " + (now - start) / 1000 + "s)");
+                    getLog().info("" + usage + ": " + warning + " (blocking for: " + (now - start) / 1000 + "s)");
                     nextWarn = now + blockedProducerWarningInterval;
                 }
             }
@@ -649,7 +662,19 @@ public abstract class BaseDestination implements Destination {
     public void setGcIfInactive(boolean gcIfInactive) {
         this.gcIfInactive = gcIfInactive;
     }
-    
+
+    /**
+     * Indicate if it is ok to gc destinations that have only network consumers
+     * @param gcWithNetworkConsumers
+     */
+    public void setGcWithNetworkConsumers(boolean gcWithNetworkConsumers) {
+        this.gcWithNetworkConsumers = gcWithNetworkConsumers;
+    }
+
+    public boolean isGcWithNetworkConsumers() {
+        return gcWithNetworkConsumers;
+    }
+
     public void markForGC(long timeStamp) {
         if (isGcIfInactive() && this.lastActiveTime == 0 && isActive() == false
                 && destinationStatistics.messages.getCount() == 0 && getInactiveTimoutBeforeGC() > 0l) {
@@ -673,5 +698,26 @@ public abstract class BaseDestination implements Destination {
 
     protected boolean isReduceMemoryFootprint() {
         return this.reduceMemoryFootprint;
+    }
+
+    public abstract List<Subscription> getConsumers();
+
+    protected boolean hasRegularConsumers(List<Subscription> consumers) {
+        boolean hasRegularConsumers = false;
+        for (Subscription subscription: consumers) {
+            if (!subscription.getConsumerInfo().isNetworkSubscription()) {
+                hasRegularConsumers = true;
+                break;
+            }
+        }
+        return hasRegularConsumers;
+    }
+
+    protected ConnectionContext createConnectionContext() {
+        ConnectionContext answer = new ConnectionContext(new NonCachedMessageEvaluationContext());
+        answer.setBroker(this.broker);
+        answer.getMessageEvaluationContext().setDestination(getActiveMQDestination());
+        answer.setSecurityContext(SecurityContext.BROKER_SECURITY_CONTEXT);
+        return answer;
     }
 }

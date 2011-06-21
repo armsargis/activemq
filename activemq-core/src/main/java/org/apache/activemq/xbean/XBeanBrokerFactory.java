@@ -24,6 +24,7 @@ import java.util.Map;
 
 import org.apache.activemq.broker.BrokerFactoryHandler;
 import org.apache.activemq.broker.BrokerService;
+import org.apache.activemq.spring.Utils;
 import org.apache.activemq.util.IntrospectionSupport;
 import org.apache.activemq.util.URISupport;
 import org.slf4j.Logger;
@@ -62,9 +63,8 @@ public class XBeanBrokerFactory implements BrokerFactoryHandler {
     public BrokerService createBroker(URI config) throws Exception {
 
         String uri = config.getSchemeSpecificPart();
-        Map<String,String> parameters = URISupport.parseQuery(uri);
-        if (!parameters.isEmpty()) {
-            IntrospectionSupport.setProperties(this, parameters);
+        if (uri.lastIndexOf('?') != -1) {
+            IntrospectionSupport.setProperties(this, URISupport.parseQuery(uri));
             uri = uri.substring(0, uri.lastIndexOf('?'));
         }
 
@@ -101,17 +101,8 @@ public class XBeanBrokerFactory implements BrokerFactoryHandler {
     }
 
     protected ApplicationContext createApplicationContext(String uri) throws MalformedURLException {
-        LOG.debug("Now attempting to figure out the type of resource: " + uri);
-
-        Resource resource;
-        File file = new File(uri);
-        if (file.exists()) {
-            resource = new FileSystemResource(uri);
-        } else if (ResourceUtils.isUrl(uri)) {
-            resource = new UrlResource(uri);
-        } else {
-            resource = new ClassPathResource(uri);
-        }
+        Resource resource = Utils.resourceFromString(uri);
+        LOG.debug("Using " + resource + " from " + uri);
         return new ResourceXmlApplicationContext(resource) {
             @Override
             protected void initBeanDefinitionReader(XmlBeanDefinitionReader reader) {

@@ -276,7 +276,7 @@ public class Topic extends BaseDestination implements Task {
         // There is delay between the client sending it and it arriving at the
         // destination.. it may have expired.
         if (message.isExpired()) {
-            broker.messageExpired(context, message);
+            broker.messageExpired(context, message, null);
             getDestinationStatistics().getExpired().increment();
             if (sendProducerAck) {
                 ProducerAck ack = new ProducerAck(producerInfo.getProducerId(), message.getSize());
@@ -293,10 +293,7 @@ public class Topic extends BaseDestination implements Task {
 
                 if (warnOnProducerFlowControl) {
                     warnOnProducerFlowControl = false;
-                    LOG
-                            .info("Usage Manager memory limit ("
-                                    + memoryUsage.getLimit()
-                                    + ") reached for "
+                    LOG.info(memoryUsage + ", Usage Manager memory limit reached for "
                                     + getActiveMQDestination().getQualifiedName()
                                     + ". Producers will be throttled to the rate at which messages are removed from this destination to prevent flooding it."
                                     + " See http://activemq.apache.org/producer-flow-control.html for more info");
@@ -304,7 +301,7 @@ public class Topic extends BaseDestination implements Task {
 
                 if (systemUsage.isSendFailIfNoSpace()) {
                     throw new javax.jms.ResourceAllocationException("Usage Manager memory limit ("
-                            + memoryUsage.getLimit() + ") reached. Stopping producer (" + message.getProducerId()
+                            + memoryUsage.getLimit() + ") reached. Rejecting send for producer (" + message.getProducerId()
                             + ") to prevent flooding " + getActiveMQDestination().getQualifiedName() + "."
                             + " See http://activemq.apache.org/producer-flow-control.html for more info");
                 }
@@ -322,7 +319,7 @@ public class Topic extends BaseDestination implements Task {
                                     // While waiting for space to free up... the
                                     // message may have expired.
                                     if (message.isExpired()) {
-                                        broker.messageExpired(context, message);
+                                        broker.messageExpired(context, message, null);
                                         getDestinationStatistics().getExpired().increment();
                                     } else {
                                         doMessageSend(producerExchange, message);
@@ -379,7 +376,7 @@ public class Topic extends BaseDestination implements Task {
                             waitForSpace(
                                     context,
                                     memoryUsage,
-                                    "Usage Manager memory limit reached. Stopping producer ("
+                                    "Usage Manager Memory Usage limit reached. Stopping producer ("
                                             + message.getProducerId()
                                             + ") to prevent flooding "
                                             + getActiveMQDestination().getQualifiedName()
@@ -427,7 +424,7 @@ public class Topic extends BaseDestination implements Task {
 
         if (topicStore != null && message.isPersistent() && !canOptimizeOutPersistence()) {
             if (systemUsage.getStoreUsage().isFull(getStoreUsageHighWaterMark())) {
-                final String logMessage = "Usage Manager Store is Full, " + getStoreUsageHighWaterMark() + "% of "
+                final String logMessage = "Persistent store is Full, " + getStoreUsageHighWaterMark() + "% of "
                         + systemUsage.getStoreUsage().getLimit() + ". Stopping producer (" + message.getProducerId()
                         + ") to prevent flooding " + getActiveMQDestination().getQualifiedName() + "."
                         + " See http://activemq.apache.org/producer-flow-control.html for more info";
@@ -447,11 +444,11 @@ public class Topic extends BaseDestination implements Task {
                 @Override
                 public void afterCommit() throws Exception {
                     // It could take while before we receive the commit
-                    // operration.. by that time the message could have
+                    // operation.. by that time the message could have
                     // expired..
                     if (broker.isExpired(message)) {
                         getDestinationStatistics().getExpired().increment();
-                        broker.messageExpired(context, message);
+                        broker.messageExpired(context, message, null);
                         message.decrementReferenceCount();
                         return;
                     }
@@ -513,6 +510,10 @@ public class Topic extends BaseDestination implements Task {
             memoryUsage.start();
         }
 
+        if (getExpireMessagesPeriod() > 0) {
+            scheduler.schedualPeriodically(expireMessagesTask, getExpireMessagesPeriod());
+        }
+
     }
 
     public void stop() throws Exception {
@@ -526,14 +527,22 @@ public class Topic extends BaseDestination implements Task {
         if (this.topicStore != null) {
             this.topicStore.stop();
         }
+
+         scheduler.cancel(expireMessagesTask);
     }
 
     public Message[] browse() {
+        final ConnectionContext connectionContext = createConnectionContext();
         final Set<Message> result = new CopyOnWriteArraySet<Message>();
         try {
             if (topicStore != null) {
                 topicStore.recover(new MessageRecoveryListener() {
                     public boolean recoverMessage(Message message) throws Exception {
+                        if (message.isExpired()) {
+                            for (Subscription sub : durableSubcribers.values()) {
+                                messageExpired(connectionContext, sub, message);
+                            }
+                        }
                         result.add(message);
                         return true;
                     }
@@ -643,8 +652,14 @@ public class Topic extends BaseDestination implements Task {
         }
     }
 
+    private final Runnable expireMessagesTask = new Runnable() {
+        public void run() {
+            browse();
+        }
+    };
+
     public void messageExpired(ConnectionContext context, Subscription subs, MessageReference reference) {
-        broker.messageExpired(context, reference);
+        broker.messageExpired(context, reference, subs);
         // AMQ-2586: Better to leave this stat at zero than to give the user
         // misleading metrics.
         // destinationStatistics.getMessages().decrement();
@@ -655,8 +670,11 @@ public class Topic extends BaseDestination implements Task {
         ack.setDestination(destination);
         ack.setMessageID(reference.getMessageId());
         try {
+            if (subs instanceof DurableTopicSubscription) {
+                ((DurableTopicSubscription)subs).removePending(reference);
+            }
             acknowledge(context, subs, ack, reference);
-        } catch (IOException e) {
+        } catch (Exception e) {
             LOG.error("Failed to remove expired Message from the store ", e);
         }
     }
@@ -665,5 +683,6 @@ public class Topic extends BaseDestination implements Task {
     protected Logger getLog() {
         return LOG;
     }
+
 
 }

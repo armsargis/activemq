@@ -38,9 +38,6 @@ import javax.security.auth.spi.LoginModule;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/**
- * @version $Rev: $ $Date: $
- */
 public class PropertiesLoginModule implements LoginModule {
 
     private static final String USER_FILE = "org.apache.activemq.jaas.properties.user";
@@ -52,53 +49,83 @@ public class PropertiesLoginModule implements LoginModule {
     private CallbackHandler callbackHandler;
 
     private boolean debug;
-    private String usersFile;
-    private String groupsFile;
-    private Properties users = new Properties();
-    private Properties groups = new Properties();
+    private boolean reload = false;
+    private static String usersFile;
+    private static String groupsFile;
+    private static Properties users;
+    private static Properties groups;
+    private static long usersReloadTime = 0;
+    private static long groupsReloadTime = 0;
     private String user;
     private Set<Principal> principals = new HashSet<Principal>();
     private File baseDir;
     private boolean loginSucceeded;
 
+    @Override
     public void initialize(Subject subject, CallbackHandler callbackHandler, Map sharedState, Map options) {
         this.subject = subject;
         this.callbackHandler = callbackHandler;
         loginSucceeded = false;
 
-        if (System.getProperty("java.security.auth.login.config") != null) {
-            baseDir = new File(System.getProperty("java.security.auth.login.config")).getParentFile();
-        } else {
-            baseDir = new File(".");
+        debug = "true".equalsIgnoreCase((String)options.get("debug"));
+        if (options.get("reload") != null) {
+            reload = "true".equalsIgnoreCase((String)options.get("reload"));
         }
 
-        debug = "true".equalsIgnoreCase((String)options.get("debug"));
-        usersFile = (String)options.get(USER_FILE) + "";
-        groupsFile = (String)options.get(GROUP_FILE) + "";
+        if (options.get("baseDir") != null) {
+            baseDir = new File((String)options.get("baseDir"));
+        }
 
-        if (debug) {
-            LOG.debug("Initialized debug=" + debug + " usersFile=" + usersFile + " groupsFile=" + groupsFile + " basedir=" + baseDir);
+        setBaseDir();
+        usersFile = (String) options.get(USER_FILE) + "";
+        File uf = baseDir != null ? new File(baseDir, usersFile) : new File(usersFile);
+
+        if (reload || users == null || uf.lastModified() > usersReloadTime) {
+            if (debug) {
+                LOG.debug("Reloading users from " + uf.getAbsolutePath());
+            }
+            try {
+                users = new Properties();
+                java.io.FileInputStream in = new java.io.FileInputStream(uf);
+                users.load(in);
+                in.close();
+                usersReloadTime = System.currentTimeMillis();
+            } catch (IOException ioe) {
+                LOG.warn("Unable to load user properties file " + uf);
+            }
+        }
+
+        groupsFile = (String) options.get(GROUP_FILE) + "";
+        File gf = baseDir != null ? new File(baseDir, groupsFile) : new File(groupsFile);
+        if (reload || groups == null || gf.lastModified() > groupsReloadTime) {
+            if (debug) {
+                LOG.debug("Reloading groups from " + gf.getAbsolutePath());
+            }
+            try {
+                groups = new Properties();
+                java.io.FileInputStream in = new java.io.FileInputStream(gf);
+                groups.load(in);
+                in.close();
+                groupsReloadTime = System.currentTimeMillis();
+            } catch (IOException ioe) {
+                LOG.warn("Unable to load group properties file " + gf);
+            }
         }
     }
 
-    public boolean login() throws LoginException {
-        File f = new File(baseDir, usersFile);
-        try {
-            java.io.FileInputStream in = new java.io.FileInputStream(f);
-            users.load(in);
-            in.close();
-        } catch (IOException ioe) {
-            throw new LoginException("Unable to load user properties file " + f);
+    private void setBaseDir() {
+        if (baseDir == null) {
+            if (System.getProperty("java.security.auth.login.config") != null) {
+                baseDir = new File(System.getProperty("java.security.auth.login.config")).getParentFile();
+                if (debug) {
+                    LOG.debug("Using basedir=" + baseDir.getAbsolutePath());
+                }
+            }
         }
-        f = new File(baseDir, groupsFile);
-        try {
-            java.io.FileInputStream in = new java.io.FileInputStream(f);
-            groups.load(in);
-            in.close();
-        } catch (IOException ioe) {
-            throw new LoginException("Unable to load group properties file " + f);
-        }
+    }
 
+    @Override
+    public boolean login() throws LoginException {
         Callback[] callbacks = new Callback[2];
 
         callbacks[0] = new NameCallback("Username: ");
@@ -115,6 +142,9 @@ public class PropertiesLoginModule implements LoginModule {
         if (tmpPassword == null) {
             tmpPassword = new char[0];
         }
+        if (user == null) {
+            throw new FailedLoginException("user name is null");
+        }
         String password = users.getProperty(user);
 
         if (password == null) {
@@ -124,7 +154,6 @@ public class PropertiesLoginModule implements LoginModule {
             throw new FailedLoginException("Password does not match");
         }
         loginSucceeded = true;
-        users.clear();
 
         if (debug) {
             LOG.debug("login " + user);
@@ -132,12 +161,13 @@ public class PropertiesLoginModule implements LoginModule {
         return loginSucceeded;
     }
 
+    @Override
     public boolean commit() throws LoginException {
         boolean result = loginSucceeded;
         if (result) {
             principals.add(new UserPrincipal(user));
 
-            for (Enumeration enumeration = groups.keys(); enumeration.hasMoreElements();) {
+            for (Enumeration<?> enumeration = groups.keys(); enumeration.hasMoreElements();) {
                 String name = (String)enumeration.nextElement();
                 String[] userList = ((String)groups.getProperty(name) + "").split(",");
                 for (int i = 0; i < userList.length; i++) {
@@ -160,6 +190,7 @@ public class PropertiesLoginModule implements LoginModule {
         return result;
     }
 
+    @Override
     public boolean abort() throws LoginException {
         clear();
 
@@ -169,6 +200,7 @@ public class PropertiesLoginModule implements LoginModule {
         return true;
     }
 
+    @Override
     public boolean logout() throws LoginException {
         subject.getPrincipals().removeAll(principals);
         principals.clear();
@@ -180,7 +212,6 @@ public class PropertiesLoginModule implements LoginModule {
     }
 
     private void clear() {
-        groups.clear();
         user = null;
         loginSucceeded = false;
     }

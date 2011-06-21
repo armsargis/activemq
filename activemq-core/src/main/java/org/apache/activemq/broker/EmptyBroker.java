@@ -247,10 +247,12 @@ public class EmptyBroker implements Broker {
         return false;
     }
 
-    public void messageExpired(ConnectionContext context, MessageReference message) {
+    public void messageExpired(ConnectionContext context, MessageReference message, Subscription subscription) {
     }
 
-    public void sendToDeadLetterQueue(ConnectionContext context, MessageReference messageReference) {
+    public void sendToDeadLetterQueue(ConnectionContext context,
+                                      MessageReference messageReference,
+                                      Subscription subscription) {
     }
 
     public Broker getRoot() {
@@ -282,7 +284,7 @@ public class EmptyBroker implements Broker {
     public void nowMasterBroker() {        
     }
 
-    public void networkBridgeStarted(BrokerInfo brokerInfo, boolean createdByDuplex) {
+    public void networkBridgeStarted(BrokerInfo brokerInfo, boolean createdByDuplex, String remoteIp) {
     }
 
     public void networkBridgeStopped(BrokerInfo brokerInfo) {

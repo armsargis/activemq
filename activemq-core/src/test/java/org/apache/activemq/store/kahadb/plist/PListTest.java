@@ -23,19 +23,29 @@ import static org.junit.Assert.assertTrue;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Vector;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.activemq.util.IOHelper;
 import org.apache.kahadb.util.ByteSequence;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class PListTest {
-
+    static final Logger LOG = LoggerFactory.getLogger(PListTest.class);
     private PListStore store;
     private PList plist;
+    final ByteSequence payload = new ByteSequence(new byte[400]);
+    final String idSeed = new String("Seed");
+    final Vector<Throwable> exceptions = new Vector<Throwable>();
    
 
     @Test
@@ -71,7 +81,7 @@ public class PListTest {
             plist.addFirst(test, bs);
         }
         assertEquals(plist.size(), COUNT);
-        int count = plist.size() - 1;
+        long count = plist.size() - 1;
         for (ByteSequence bs : map.values()) {
             String origStr = new String(bs.getData(), bs.getOffset(), bs.getLength());
             PListEntry entry = plist.get(count);
@@ -98,7 +108,7 @@ public class PListTest {
         assertEquals(plist.size(), COUNT);
         PListEntry entry = plist.getFirst();
         while (entry != null) {
-            plist.remove(entry.copy());
+            plist.remove(entry.getId());
             entry = plist.getFirst();
         }
         assertEquals(0,plist.size());
@@ -124,7 +134,6 @@ public class PListTest {
         }
         plist.destroy();
         assertEquals(0,plist.size());
-        assertNull("no first entry", plist.getFirst());
     }
     
     @Test
@@ -147,7 +156,257 @@ public class PListTest {
         assertTrue(plist.remove(0));
         assertFalse(plist.remove(3));
     }
-    
+
+
+    @Test
+    public void testConcurrentAddRemove() throws Exception {
+        File directory = store.getDirectory();
+        store.stop();
+        IOHelper.mkdirs(directory);
+        IOHelper.deleteChildren(directory);
+        store = new PListStore();
+        store.setDirectory(directory);
+        store.setJournalMaxFileLength(1024*5);
+        store.start();
+
+        final ByteSequence payload = new ByteSequence(new byte[1024*4]);
+
+
+        final Vector<Throwable> exceptions = new Vector<Throwable>();
+        final int iterations = 1000;
+        final int numLists = 10;
+
+        final PList[] lists = new PList[numLists];
+        for (int i=0; i<numLists; i++) {
+            lists[i] = store.getPList("List" + i);
+        }
+
+        ExecutorService executor = Executors.newFixedThreadPool(100);
+        class A implements Runnable {
+            @Override
+            public void run() {
+                try {
+                    for (int i=0; i<iterations; i++) {
+                        PList candidate = lists[i%numLists];
+                        candidate.addLast(String.valueOf(i), payload);
+                        PListEntry entry = candidate.getFirst();
+                        assertTrue(candidate.remove(String.valueOf(i)));
+                    }
+                } catch (Exception error) {
+                    error.printStackTrace();
+                    exceptions.add(error);
+                }
+            }
+        };
+
+        class B implements  Runnable {
+            @Override
+            public void run() {
+                try {
+                    for (int i=0; i<iterations; i++) {
+                        PList candidate = lists[i%numLists];
+                        candidate.addLast(String.valueOf(i), payload);
+                        PListEntry entry = candidate.getFirst();
+                        assertTrue(candidate.remove(String.valueOf(i)));
+                    }
+                } catch (Exception error) {
+                    error.printStackTrace();
+                    exceptions.add(error);
+                }
+            }
+        };
+
+        executor.execute(new A());
+        executor.execute(new A());
+        executor.execute(new A());
+        executor.execute(new B());
+        executor.execute(new B());
+        executor.execute(new B());
+
+        executor.shutdown();
+        executor.awaitTermination(30, TimeUnit.SECONDS);
+
+        assertTrue("no exceptions", exceptions.isEmpty());
+    }
+
+
+    @Test
+    public void testConcurrentAddLast() throws Exception {
+        File directory = store.getDirectory();
+        store.stop();
+        IOHelper.mkdirs(directory);
+        IOHelper.deleteChildren(directory);
+        store = new PListStore();
+        store.setDirectory(directory);
+        //store.setJournalMaxFileLength(1024*5);
+        store.start();
+
+
+        final int numThreads = 20;
+        final int iterations = 2000;
+        ExecutorService executor = Executors.newFixedThreadPool(100);
+        for (int i=0; i<numThreads; i++) {
+            new Job(i, PListTest.TaskType.ADD, iterations).run();
+        }
+
+        for (int i=0; i<numThreads; i++) {
+            executor.execute(new Job(i, PListTest.TaskType.ITERATE, iterations));
+        }
+
+        for (int i=0; i<100; i++) {
+            executor.execute(new Job(i+20, PListTest.TaskType.ADD, 100));
+        }
+
+        executor.shutdown();
+        executor.awaitTermination(60*5, TimeUnit.SECONDS);
+    }
+
+    @Test
+    public void testOverFlow() throws Exception {
+        File directory = store.getDirectory();
+        store.stop();
+        IOHelper.mkdirs(directory);
+        IOHelper.deleteChildren(directory);
+        store = new PListStore();
+        store.setDirectory(directory);
+        store.start();
+
+        for (int i=0;i<2000; i++) {
+            new Job(i, PListTest.TaskType.ADD, 5).run();
+
+        }
+        LOG.info("After Load index file: " + store.pageFile.getFile().length());
+        LOG.info("After remove index file: " + store.pageFile.getFile().length());
+    }
+
+
+    @Test
+    public void testConcurrentAddRemoveWithPreload() throws Exception {
+        File directory = store.getDirectory();
+        store.stop();
+        IOHelper.mkdirs(directory);
+        IOHelper.deleteChildren(directory);
+        store = new PListStore();
+        store.setDirectory(directory);
+        store.setJournalMaxFileLength(1024*5);
+        store.setCleanupInterval(5000);
+        store.start();
+
+        final int iterations = 5000;
+        final int numLists = 10;
+
+        // prime the store
+
+        // create/delete
+        LOG.info("create");
+        for (int i=0; i<numLists;i++) {
+            new Job(i, PListTest.TaskType.CREATE, iterations).run();
+        }
+
+        LOG.info("delete");
+        for (int i=0; i<numLists;i++) {
+            new Job(i, PListTest.TaskType.DELETE, iterations).run();
+        }
+
+        LOG.info("fill");
+        for (int i=0; i<numLists;i++) {
+            new Job(i, PListTest.TaskType.ADD, iterations).run();
+        }
+        LOG.info("remove");
+        for (int i=0; i<numLists;i++) {
+            new Job(i, PListTest.TaskType.REMOVE, iterations).run();
+        }
+
+        LOG.info("check empty");
+        for (int i=0; i<numLists;i++) {
+            assertEquals("empty " + i, 0, store.getPList("List-" + i).size());
+        }
+
+        LOG.info("delete again");
+        for (int i=0; i<numLists;i++) {
+            new Job(i, PListTest.TaskType.DELETE, iterations).run();
+        }
+
+        LOG.info("fill again");
+        for (int i=0; i<numLists;i++) {
+            new Job(i, PListTest.TaskType.ADD, iterations).run();
+        }
+
+        LOG.info("parallel add and remove");
+        ExecutorService executor = Executors.newFixedThreadPool(numLists*2);
+        for (int i=0; i<numLists*2; i++) {
+            executor.execute(new Job(i, i>=numLists ? PListTest.TaskType.ADD : PListTest.TaskType.REMOVE, iterations));
+        }
+
+        executor.shutdown();
+        LOG.info("wait for parallel work to complete");
+        executor.awaitTermination(60*5, TimeUnit.SECONDS);
+        assertTrue("no exceptions", exceptions.isEmpty());
+    }
+
+    enum TaskType {CREATE, DELETE, ADD, REMOVE, ITERATE}
+
+    class Job implements Runnable {
+
+        int id;
+        TaskType task;
+        int iterations;
+
+        public Job(int id, TaskType t, int iterations) {
+            this.id = id;
+            this.task = t;
+            this.iterations = iterations;
+        }
+
+        @Override
+        public void run() {
+            try {
+                PList plist = null;
+                switch (task) {
+                    case CREATE:
+                        plist = store.getPList("List-" + id);
+                        break;
+                    case DELETE:
+                        store.removePList("List-" + id);
+                        break;
+                    case ADD:
+                        plist = store.getPList("List-" + id);
+
+                        for (int j = 0; j < iterations; j++) {
+                            plist.addLast(idSeed + "id" + j, payload);
+                            if (j > 0 && j % (iterations / 2) == 0) {
+                                LOG.info("Job-" + id + ", Done: " + j);
+                            }
+                        }
+                        break;
+                    case REMOVE:
+                        plist = store.getPList("List-" + id);
+
+                        for (int j = iterations -1; j >= 0; j--) {
+                            plist.remove(idSeed + "id" + j);
+                            if (j > 0 && j % (iterations / 2) == 0) {
+                                LOG.info("Job-" + id + " Done remove: " + j);
+                            }
+                        }
+                        break;
+                    case ITERATE:
+                        plist = store.getPList("List-" + id);
+
+                        Iterator<PListEntry> iterator = plist.iterator();
+                        PListEntry element = null;
+                        while (iterator.hasNext()) {
+                            element = iterator.next();
+                        }
+                        break;
+                    default:
+                }
+
+            } catch (Exception e) {
+                e.printStackTrace();
+                exceptions.add(e);
+            }
+        }
+    }
 
     @Before
     public void setUp() throws Exception {
@@ -168,6 +427,7 @@ public class PListTest {
     @After
     public void tearDown() throws Exception {
         store.stop();
+        exceptions.clear();
     }
 
 }

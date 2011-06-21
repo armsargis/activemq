@@ -305,19 +305,21 @@ public interface Broker extends Region, Service {
 
     /**
      * A Message has Expired
-     * 
+     *
      * @param context
      * @param messageReference
+     * @param subscription, may be null
      */
-    void messageExpired(ConnectionContext context, MessageReference messageReference);
+    void messageExpired(ConnectionContext context, MessageReference messageReference, Subscription subscription);
 
     /**
      * A message needs to go the a DLQ
      * 
      * @param context
      * @param messageReference
+     * @param subscription, may be null
      */
-    void sendToDeadLetterQueue(ConnectionContext context, MessageReference messageReference);
+    void sendToDeadLetterQueue(ConnectionContext context, MessageReference messageReference, Subscription subscription);
     
     /**
      * @return the broker sequence id
@@ -380,7 +382,7 @@ public interface Broker extends Region, Service {
     
     ThreadPoolExecutor getExecutor();
 
-    void networkBridgeStarted(BrokerInfo brokerInfo, boolean createdByDuplex);
+    void networkBridgeStarted(BrokerInfo brokerInfo, boolean createdByDuplex, String remoteIp);
 
     void networkBridgeStopped(BrokerInfo brokerInfo);
 

@@ -107,7 +107,6 @@ public class AMQPersistenceAdapter implements PersistenceAdapter, UsageListener,
     private Runnable periodicCleanupTask;
     private boolean deleteAllMessages;
     private boolean syncOnWrite;
-    private boolean syncOnTransaction=true;
     private String brokerName = "";
     private File directory;
     private File directoryArchive;
@@ -174,11 +173,13 @@ public class AMQPersistenceAdapter implements PersistenceAdapter, UsageListener,
         }
         if (this.brokerService != null) {
             this.taskRunnerFactory = this.brokerService.getTaskRunnerFactory();
-        }else {
+            this.scheduler = this.brokerService.getScheduler();
+        } else {
+            this.taskRunnerFactory = new TaskRunnerFactory("AMQPersistenceAdaptor Task", getJournalThreadPriority(),
+                true, 1000, isUseDedicatedTaskRunner());
             this.scheduler = new Scheduler("AMQPersistenceAdapter Scheduler");
         }
-        this.taskRunnerFactory= new TaskRunnerFactory("AMQPersistenceAdaptor Task", getJournalThreadPriority(),
-                true, 1000, isUseDedicatedTaskRunner());
+
         IOHelper.mkdirs(this.directory);
         lockFile = new RandomAccessFile(new File(directory, "lock"), "rw");
         lock();
@@ -201,10 +202,6 @@ public class AMQPersistenceAdapter implements PersistenceAdapter, UsageListener,
         referenceStoreAdapter.setUsageManager(usageManager);
         referenceStoreAdapter.setMaxDataFileLength(getMaxReferenceFileLength());
         
-        if (brokerService != null) {
-            this.scheduler = this.brokerService.getBroker().getScheduler();
-        }
-                
         if (failIfJournalIsLocked) {
             asyncDataManager.lock();
         } else {
@@ -336,6 +333,11 @@ public class AMQPersistenceAdapter implements PersistenceAdapter, UsageListener,
         IOException firstException = null;
         referenceStoreAdapter.stop();
         referenceStoreAdapter = null;
+
+        if (this.brokerService == null) {
+            this.taskRunnerFactory.shutdown();
+            this.scheduler.stop();
+        }
         try {
             LOG.debug("Journal close");
             asyncDataManager.close();
@@ -834,14 +836,6 @@ public class AMQPersistenceAdapter implements PersistenceAdapter, UsageListener,
         this.syncOnWrite = syncOnWrite;
     }
     
-    public boolean isSyncOnTransaction() {
-        return syncOnTransaction;
-    }
-
-    public void setSyncOnTransaction(boolean syncOnTransaction) {
-        this.syncOnTransaction = syncOnTransaction;
-    }
-
     /**
      * @param referenceStoreAdapter the referenceStoreAdapter to set
      */
@@ -1091,7 +1085,7 @@ public class AMQPersistenceAdapter implements PersistenceAdapter, UsageListener,
             String property = System.getProperty(key);
             if (null == property) {
                 if (!BROKEN_FILE_LOCK) {
-                    lock = lockFile.getChannel().tryLock();
+                    lock = lockFile.getChannel().tryLock(0, Math.max(1, lockFile.getChannel().size()), false);
                     if (lock == null) {
                         result = false;
                     } else {

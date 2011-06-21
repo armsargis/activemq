@@ -6,9 +6,9 @@
   The ASF licenses this file to You under the Apache License, Version 2.0
   (the "License"); you may not use this file except in compliance with
   the License.  You may obtain a copy of the License at
-  
+
   http://www.apache.org/licenses/LICENSE-2.0
-  
+
   Unless required by applicable law or agreed to in writing, software
   distributed under the License is distributed on an "AS IS" BASIS,
   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -25,13 +25,13 @@
 
   <groupId>org.apache.activemq</groupId>
   <artifactId>activemq-parent</artifactId>
-  <version>5.5-SNAPSHOT</version>
+  <version>5.6-SNAPSHOT</version>
   <packaging>pom</packaging>
   <name>ActiveMQ</name>
   <inceptionYear>2005</inceptionYear>
 
   <properties>
-    <activemq-version>5.5-SNAPSHOT</activemq-version>
+    <activemq-version>5.6-SNAPSHOT</activemq-version>
     <siteId>activemq-${activemq-version}</siteId>
     <projectName>Apache ActiveMQ</projectName>
     <!-- base url for site deployment.  See distribution management for full url.  Override this in settings.xml for staging -->
@@ -45,7 +45,7 @@
     <aries-version>0.2-incubating</aries-version>
     <axion-version>1.0-M3-dev</axion-version>
     <axis-version>1.2-RC1</axis-version>
-    <camel-version>2.6.0</camel-version>
+    <camel-version>2.7.0</camel-version>
     <cglib-version>2.0</cglib-version>
     <commons-beanutils-version>1.6.1</commons-beanutils-version>
     <commons-collections-version>3.2.1</commons-collections-version>
@@ -57,18 +57,17 @@
     <commons-logging-version>1.1</commons-logging-version>
     <commons-pool-version>1.5.4</commons-pool-version>
     <commons-primitives-version>1.0</commons-primitives-version>
-    <directory-version>1.5.5</directory-version>
+    <directory-version>1.5.7</directory-version>
     <geronimo-version>1.0</geronimo-version>
     <howl-version>0.1.8</howl-version>
     <hsqldb-version>1.7.2.2</hsqldb-version>
-    <icu-version>4.0.1</icu-version>
-    <jasypt-version>1.6</jasypt-version>
+    <jasypt-version>1.7</jasypt-version>
     <jdom-version>1.0</jdom-version>
     <jetty-version>7.1.6.v20100715</jetty-version>
     <jsp-version>2.1.v20100127</jsp-version>
     <jettison-version>1.2</jettison-version>
     <jmock-version>2.5.1</jmock-version>
-    <junit-version>4.5</junit-version>
+    <junit-version>4.8.1</junit-version>
     <jxta-version>2.0</jxta-version>
     <karaf-version>2.2.0</karaf-version>
     <log4j-version>1.2.14</log4j-version>
@@ -79,8 +78,6 @@
     <!-- pax-logging (osgi) dont support slf4j 1.6.x -->
     <slf4j-version>1.5.11</slf4j-version>
     <spring-oxm-version>1.5.8</spring-oxm-version>
-    <stax-api-version>1.0.1</stax-api-version>
-    <stax-version>1.2.0</stax-version>
     <xalan-version>2.6.0</xalan-version>
     <xmlbeans-version>2.0.0-beta1</xmlbeans-version>
     <xpp3-version>1.1.4c</xpp3-version>
@@ -166,13 +163,13 @@
     <developerConnection>scm:svn:https://svn.apache.org/repos/asf/activemq/trunk</developerConnection>
     <url>http://svn.apache.org/viewvc/activemq/trunk/</url>
   </scm>
-  
+
   <repositories>
     <repository>
         <id>com.springsource.repository.bundles.external</id>
         <name>SpringSource Enterprise Bundle Repository - External Bundle Releases</name>
         <url>http://repository.springsource.com/maven/bundles/external</url>
-    </repository> 
+    </repository>
     <repository>
       <id>apache.snapshots</id>
       <url>https://repository.apache.org/content/repositories/snapshots/</url>
@@ -236,7 +233,7 @@
         <groupId>org.apache.activemq</groupId>
         <artifactId>activemq-spring</artifactId>
         <version>${activemq-version}</version>
-      </dependency>      
+      </dependency>
       <dependency>
         <groupId>org.apache.activemq</groupId>
         <artifactId>activemq-web</artifactId>
@@ -398,7 +395,7 @@
         <artifactId>geronimo-servlet_2.5_spec</artifactId>
         <version>1.2</version>
       </dependency>
-      
+
       <dependency>
         <groupId>org.apache.geronimo.specs</groupId>
         <artifactId>geronimo-annotation_1.0_spec</artifactId>
@@ -433,7 +430,7 @@
       <dependency>
         <groupId>org.apache.camel</groupId>
         <artifactId>camel-web</artifactId>
-        <version>${camel-version}</version>
+        <version>2.4.0</version>
         <type>war</type>
       </dependency>
 
@@ -449,37 +446,13 @@
         <version>3.0.0</version>
         <optional>true</optional>
       </dependency>
-      
+
     <!-- For jsvc support -->
     <dependency>
       <groupId>commons-daemon</groupId>
       <artifactId>commons-daemon</artifactId>
       <version>1.0.3</version>
-    </dependency> 
-
-      <!-- for the XML parsing -->
-      <dependency>
-        <groupId>javax.xml.bind</groupId>
-        <artifactId>jaxb-api</artifactId>
-        <version>2.1</version>
-        <exclusions>
-          <exclusion>
-            <groupId>javax.xml</groupId>
-            <artifactId>jsr173</artifactId>
-          </exclusion>
-        </exclusions>
-      </dependency>
-      <dependency>
-        <groupId>com.sun.xml.bind</groupId>
-        <artifactId>jaxb-impl</artifactId>
-        <version>2.1.6</version>
-        <exclusions>
-          <exclusion>
-            <groupId>javax.jws</groupId>
-            <artifactId>jsr181-api</artifactId>
-          </exclusion>
-        </exclusions>
-      </dependency>
+    </dependency>
 
       <!-- camel testing -->
       <dependency>
@@ -751,18 +724,6 @@
         <version>${xmlbeans-version}</version>
       </dependency>
 
-      <!-- For Stax -->
-      <dependency>
-        <groupId>stax</groupId>
-        <artifactId>stax-api</artifactId>
-        <version>${stax-api-version}</version>
-      </dependency>
-      <dependency>
-        <groupId>stax</groupId>
-        <artifactId>stax</artifactId>
-        <version>${stax-version}</version>
-      </dependency>
-
       <!-- To use XPath using JAXP 1.3 (std in Java 5) -->
       <dependency>
         <groupId>activesoap</groupId>
@@ -782,7 +743,7 @@
         <version>${xstream-version}</version>
         <exclusions>
           <exclusion>
-            <!-- xom is an optional dependency of xstream. Its also 
+            <!-- xom is an optional dependency of xstream. Its also
               LGPL, so its really not ASF compatible. -->
             <groupId>xom</groupId>
             <artifactId>xom</artifactId>
@@ -825,18 +786,12 @@
         <artifactId>aopalliance</artifactId>
         <version>${aopalliance-version}</version>
       </dependency>
-      
+
       <dependency>
         <groupId>org.jasypt</groupId>
         <artifactId>jasypt</artifactId>
         <version>${jasypt-version}</version>
       </dependency>
-      
-      <dependency>
-        <groupId>com.ibm.icu</groupId>
-        <artifactId>icu4j</artifactId>
-        <version>${icu-version}</version>
-      </dependency>                    
 
       <!-- testing dependencies -->
       <dependency>
@@ -867,7 +822,7 @@
         <groupId>org.codehaus.jettison</groupId>
         <artifactId>jettison</artifactId>
         <version>${jettison-version}</version>
-    </dependency>  
+    </dependency>
 
       <dependency>
         <groupId>annogen</groupId>
@@ -944,9 +899,9 @@
       <dependency>
         <groupId>org.apache.geronimo.components</groupId>
         <artifactId>geronimo-transaction</artifactId>
-        <version>2.1</version>
+        <version>2.2.1</version>
       </dependency>
-      
+
       <!-- FTP support for BlobMessages -->
         <dependency>
             <groupId>commons-net</groupId>
@@ -1266,7 +1221,7 @@
 
     </plugins>
   </reporting>
-  
+
   <profiles>
 
     <profile>
@@ -1289,38 +1244,38 @@
         </plugins>
       </build>
     </profile>
-    <profile> 
-      <id>deploy</id> 
-      <build> 
-        <defaultGoal>deploy</defaultGoal> 
-        <plugins> 
-          <plugin> 
-            <groupId>org.apache.maven.plugins</groupId> 
-            <artifactId>maven-source-plugin</artifactId> 
-            <version>2.1</version> 
-            <executions> 
-              <execution> 
-                <id>attach-sources</id> 
-                <goals> 
-                  <goal>jar</goal> 
-                </goals> 
-              </execution> 
-            </executions> 
-          </plugin> 
-          <plugin> 
-            <groupId>org.apache.maven.plugins</groupId> 
-            <artifactId>maven-javadoc-plugin</artifactId> 
-            <executions> 
-              <execution> 
-                <id>attach-javadocs</id> 
-                  <goals> 
-                    <goal>jar</goal> 
-                  </goals> 
-              </execution> 
-            </executions> 
-          </plugin> 
-        </plugins> 
-      </build> 
+    <profile>
+      <id>deploy</id>
+      <build>
+        <defaultGoal>deploy</defaultGoal>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-source-plugin</artifactId>
+            <version>2.1</version>
+            <executions>
+              <execution>
+                <id>attach-sources</id>
+                <goals>
+                  <goal>jar</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>attach-javadocs</id>
+                  <goals>
+                    <goal>jar</goal>
+                  </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
     </profile>
   </profiles>
 

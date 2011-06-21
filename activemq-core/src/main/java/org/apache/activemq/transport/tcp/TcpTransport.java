@@ -37,6 +37,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.net.SocketFactory;
 import org.apache.activemq.Service;
+import org.apache.activemq.thread.DefaultThreadPools;
 import org.apache.activemq.transport.Transport;
 import org.apache.activemq.transport.TransportLoggerFactory;
 import org.apache.activemq.transport.TransportThreadSupport;
@@ -46,9 +47,6 @@ import org.apache.activemq.util.ServiceStopper;
 import org.apache.activemq.wireformat.WireFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-
-import static org.apache.activemq.thread.DefaultThreadPools.getDefaultTaskRunnerFactory;
 
 /**
  * An implementation of the {@link Transport} interface using raw tcp/ip
@@ -71,6 +69,8 @@ public class TcpTransport extends TransportThreadSupport implements Transport, S
     protected DataOutputStream dataOut;
     protected DataInputStream dataIn;
     protected TimeStampStream buffOut = null;
+
+
     /**
      * The Traffic Class to be set on the socket.
      */
@@ -131,6 +131,7 @@ public class TcpTransport extends TransportThreadSupport implements Transport, S
     protected final AtomicReference<CountDownLatch> stoppedLatch = new AtomicReference<CountDownLatch>();
 
     private Map<String, Object> socketOptions;
+    private int soLinger = Integer.MIN_VALUE;
     private Boolean keepAlive;
     private Boolean tcpNoDelay;
     private Thread runnerThread;
@@ -360,6 +361,18 @@ public class TcpTransport extends TransportThreadSupport implements Transport, S
         this.keepAlive = keepAlive;
     }
 
+    /**
+     * Enable/disable soLinger
+     * @param soLinger enabled if > -1, disabled if == -1, system default otherwise
+     */
+    public void setSoLinger(int soLinger) {
+        this.soLinger = soLinger;
+    }
+
+    public int getSoLinger() {
+        return soLinger;
+    }
+
     public Boolean getTcpNoDelay() {
         return tcpNoDelay;
     }
@@ -435,6 +448,12 @@ public class TcpTransport extends TransportThreadSupport implements Transport, S
 
         if (keepAlive != null) {
             sock.setKeepAlive(keepAlive.booleanValue());
+        }
+
+        if (soLinger > -1) {
+            sock.setSoLinger(true, soLinger);
+        } else if (soLinger == -1) {
+            sock.setSoLinger(false, 0);
         }
         if (tcpNoDelay != null) {
             sock.setTcpNoDelay(tcpNoDelay.booleanValue());
@@ -518,7 +537,7 @@ public class TcpTransport extends TransportThreadSupport implements Transport, S
                 //closing the socket can hang also 
                 final CountDownLatch latch = new CountDownLatch(1);
                 
-                getDefaultTaskRunnerFactory().execute(new Runnable() {
+                DefaultThreadPools.getDefaultTaskRunnerFactory().execute(new Runnable() {
     
                     public void run() {
                         try {

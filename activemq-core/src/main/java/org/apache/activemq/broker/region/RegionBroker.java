@@ -104,7 +104,7 @@ public class RegionBroker extends EmptyBroker {
     private ConnectionContext adminConnectionContext;
     private final Scheduler scheduler;
     private final ThreadPoolExecutor executor;
-    
+    private boolean allowTempAutoCreationOnSend;
     private final Runnable purgeInactiveDestinationsTask = new Runnable() {
         public void run() {
             purgeInactiveDestinations();
@@ -393,7 +393,7 @@ public class RegionBroker extends EmptyBroker {
 
                 // This seems to cause the destination to be added but without
                 // advisories firing...
-                context.getBroker().addDestination(context, destination, false);
+                context.getBroker().addDestination(context, destination, true);
                 switch (destination.getDestinationType()) {
                 case ActiveMQDestination.QUEUE_TYPE:
                     queueRegion.addProducer(context, info);
@@ -499,7 +499,7 @@ public class RegionBroker extends EmptyBroker {
                 || (producerExchange.getRegion() != null && producerExchange.getRegion().getDestinationMap().get(message.getDestination()) == null)) {
             ActiveMQDestination destination = message.getDestination();
             // ensure the destination is registered with the RegionBroker
-            producerExchange.getConnectionContext().getBroker().addDestination(producerExchange.getConnectionContext(), destination,false);
+            producerExchange.getConnectionContext().getBroker().addDestination(producerExchange.getConnectionContext(), destination, isAllowTempAutoCreationOnSend());
             Region region;
             switch (destination.getDestinationType()) {
             case ActiveMQDestination.QUEUE_TYPE:
@@ -806,16 +806,16 @@ public class RegionBroker extends EmptyBroker {
 
     
     @Override
-    public void messageExpired(ConnectionContext context, MessageReference node) {
+    public void messageExpired(ConnectionContext context, MessageReference node, Subscription subscription) {
         if (LOG.isDebugEnabled()) {
             LOG.debug("Message expired " + node);
         }
-        getRoot().sendToDeadLetterQueue(context, node);
+        getRoot().sendToDeadLetterQueue(context, node, subscription);
     }
     
     @Override
     public void sendToDeadLetterQueue(ConnectionContext context,
-	        MessageReference node){
+	        MessageReference node, Subscription subscription){
 		try{
 			if(node!=null){
 				Message message=node.getMessage();
@@ -838,8 +838,7 @@ public class RegionBroker extends EmptyBroker {
 							// it is only populated if the message is routed to
 							// another destination like the DLQ
 							ActiveMQDestination deadLetterDestination=deadLetterStrategy
-							        .getDeadLetterQueueFor(message
-							                .getDestination());
+							        .getDeadLetterQueueFor(message, subscription);
 							if (context.getBroker()==null) {
 								context.setBroker(getRoot());
 							}
@@ -936,6 +935,10 @@ public class RegionBroker extends EmptyBroker {
         synchronized (purgeInactiveDestinationsTask) {
             List<BaseDestination> list = new ArrayList<BaseDestination>();
             Map<ActiveMQDestination, Destination> map = getDestinationMap();
+            if (isAllowTempAutoCreationOnSend()) {
+                map.putAll(tempQueueRegion.getDestinationMap());
+                map.putAll(tempTopicRegion.getDestinationMap());
+            }
             long timeStamp = System.currentTimeMillis();
             for (Destination d : map.values()) {
                 if (d instanceof BaseDestination) {
@@ -957,12 +960,20 @@ public class RegionBroker extends EmptyBroker {
                             dest.getName() + " Inactive for longer than " + dest.getInactiveTimoutBeforeGC()
                                     + " ms - removing ...");
                     try {
-                        getRoot().removeDestination(context, dest.getActiveMQDestination(), 0);
+                        getRoot().removeDestination(context, dest.getActiveMQDestination(), isAllowTempAutoCreationOnSend() ? 1 : 0);
                     } catch (Exception e) {
                         LOG.error("Failed to remove inactive destination " + dest, e);
                     }
                 }
             }
         }
+    }
+
+    public boolean isAllowTempAutoCreationOnSend() {
+        return allowTempAutoCreationOnSend;
+    }
+
+    public void setAllowTempAutoCreationOnSend(boolean allowTempAutoCreationOnSend) {
+        this.allowTempAutoCreationOnSend = allowTempAutoCreationOnSend;
     }
 }

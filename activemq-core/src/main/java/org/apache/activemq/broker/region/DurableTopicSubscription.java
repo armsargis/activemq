@@ -110,7 +110,7 @@ public class DurableTopicSubscription extends PrefetchSubscription implements Us
             try {
                 this.enqueueCounter+=store.getMessageCount(subscriptionKey.getClientId(),subscriptionKey.getSubscriptionName());
             } catch (IOException e) {
-                JMSException jmsEx = new JMSException("Failed to retrieve eunqueueCount from store "+ e);
+                JMSException jmsEx = new JMSException("Failed to retrieve enqueueCount from store "+ e);
                 jmsEx.setLinkedException(e);
                 throw jmsEx;
             }
@@ -207,9 +207,11 @@ public class DurableTopicSubscription extends PrefetchSubscription implements Us
     
     protected MessageDispatch createMessageDispatch(MessageReference node, Message message) {
         MessageDispatch md = super.createMessageDispatch(node, message);
-        Integer count = redeliveredMessages.get(node.getMessageId());
-        if (count != null) {
-            md.setRedeliveryCounter(count.intValue());
+        if (node != QueueMessageReference.NULL_MESSAGE) {
+            Integer count = redeliveredMessages.get(node.getMessageId());
+            if (count != null) {
+                md.setRedeliveryCounter(count.intValue());
+            }
         }
         return md;
     }
@@ -225,6 +227,10 @@ public class DurableTopicSubscription extends PrefetchSubscription implements Us
         if (isActive()) {
             super.dispatchPending();
         }
+    }
+
+    public void removePending(MessageReference node) throws IOException {
+        pending.remove(node);
     }
     
     protected void doAddRecoveredMessage(MessageReference message) throws Exception {

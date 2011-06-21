@@ -138,6 +138,7 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
     private boolean objectMessageSerializationDefered;
     private boolean useAsyncSend;
     private boolean optimizeAcknowledge;
+    private long optimizeAcknowledgeTimeOut = 0;
     private boolean nestedMapAndListEnabled = true;
     private boolean useRetroactiveConsumer;
     private boolean exclusiveConsumer;
@@ -200,7 +201,7 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
      * @param factoryStats
      * @throws Exception
      */
-    protected ActiveMQConnection(final Transport transport, IdGenerator clientIdGenerator, JMSStatsImpl factoryStats) throws Exception {
+    protected ActiveMQConnection(final Transport transport, IdGenerator clientIdGenerator, IdGenerator connectionIdGenerator, JMSStatsImpl factoryStats) throws Exception {
 
         this.transport = transport;
         this.clientIdGenerator = clientIdGenerator;
@@ -216,7 +217,7 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
             }
         });
         // asyncConnectionThread.allowCoreThreadTimeOut(true);
-        String uniqueId = CONNECTION_ID_GENERATOR.generateId();
+        String uniqueId = connectionIdGenerator.generateId();
         this.info = new ConnectionInfo(new ConnectionId(uniqueId));
         this.info.setManageable(true);
         this.info.setFaultTolerant(transport.isFaultTolerant());
@@ -1618,6 +1619,18 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
      */
     public void setOptimizeAcknowledge(boolean optimizeAcknowledge) {
         this.optimizeAcknowledge = optimizeAcknowledge;
+    }
+
+    /**
+     * The max time in milliseconds between optimized ack batches
+     * @param optimizeAcknowledgeTimeOut
+     */
+    public void setOptimizeAcknowledgeTimeOut(int optimizeAcknowledgeTimeOut) {
+        this.optimizeAcknowledgeTimeOut =  optimizeAcknowledgeTimeOut;
+    }
+
+    public long getOptimizeAcknowledgeTimeOut() {
+        return optimizeAcknowledgeTimeOut;
     }
 
     public long getWarnAboutUnstartedConnectionTimeout() {

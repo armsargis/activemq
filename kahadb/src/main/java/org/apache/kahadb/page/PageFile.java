@@ -64,6 +64,7 @@ public class PageFile {
     // 4k Default page size.
     public static final int DEFAULT_PAGE_SIZE = Integer.parseInt(System.getProperty("defaultPageSize", ""+1024*4)); 
     public static final int DEFAULT_WRITE_BATCH_SIZE = Integer.parseInt(System.getProperty("defaultWriteBatchSize", ""+1000));
+    public static final int DEFAULT_PAGE_CACHE_SIZE = Integer.parseInt(System.getProperty("defaultPageCacheSize", ""+100));;
     private static final int RECOVERY_FILE_HEADER_SIZE=1024*4;
     private static final int PAGE_FILE_HEADER_SIZE=1024*4;
 
@@ -103,8 +104,8 @@ public class PageFile {
     // The cache of recently used pages.
     private boolean enablePageCaching=true;
     // How many pages will we keep in the cache?
-    private int pageCacheSize = 100;
-    
+    private int pageCacheSize = DEFAULT_PAGE_CACHE_SIZE;
+
     // Should first log the page write to the recovery buffer? Avoids partial
     // page write failures..
     private boolean enableRecoveryFile=true;
@@ -129,7 +130,7 @@ public class PageFile {
     
     // Persistent settings stored in the page file. 
     private MetaData metaData;
-    
+
     /**
      * Use to keep track of updated pages which have not yet been committed.
      */
@@ -634,7 +635,7 @@ public class PageFile {
     }
 
     /**
-     * @param allows you to enable read page caching
+     * @param enablePageCaching allows you to enable read page caching
      */
     public void setEnablePageCaching(boolean enablePageCaching) {
         assertNotLoaded();
@@ -649,7 +650,7 @@ public class PageFile {
     }
 
     /**
-     * @param Sets the maximum number of pages that will get stored in the read page cache.
+     * @param pageCacheSize Sets the maximum number of pages that will get stored in the read page cache.
      */
     public void setPageCacheSize(int pageCacheSize) {
         assertNotLoaded();
@@ -678,6 +679,11 @@ public class PageFile {
 
     public int getRecoveryFileMinPageCount() {
         return recoveryFileMinPageCount;
+    }
+
+    public long getFreePageCount() {
+        assertLoaded();
+        return freeList.rangeSize();
     }
 
     public void setRecoveryFileMinPageCount(int recoveryFileMinPageCount) {
@@ -915,8 +921,6 @@ public class PageFile {
 
     /**
      * 
-     * @param timeout
-     * @param unit
      * @return true if there are still pending writes to do.
      * @throws InterruptedException 
      * @throws IOException 
