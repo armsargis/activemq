@@ -131,6 +131,8 @@ public class PageFile {
     // Persistent settings stored in the page file. 
     private MetaData metaData;
 
+    private ArrayList<File> tmpFilesForRemoval = new ArrayList<File>();
+
     /**
      * Use to keep track of updated pages which have not yet been committed.
      */
@@ -138,8 +140,8 @@ public class PageFile {
         Page page;
         byte[] current;
         byte[] diskBound;
-        int currentLocation = -1;
-        int diskBoundLocation = -1;
+        long currentLocation = -1;
+        long diskBoundLocation = -1;
         File tmpFile;
         int length;
 
@@ -148,7 +150,7 @@ public class PageFile {
             current=data;
         }
 
-        public PageWrite(Page page, int currentLocation, int length, File tmpFile) {
+        public PageWrite(Page page, long currentLocation, int length, File tmpFile) {
             this.page = page;
             this.currentLocation = currentLocation;
             this.tmpFile = tmpFile;
@@ -162,7 +164,7 @@ public class PageFile {
             diskBoundLocation = -1;
         }
 
-        public void setCurrentLocation(Page page, int location, int length) {
+        public void setCurrentLocation(Page page, long location, int length) {
             this.page = page;
             this.currentLocation = location;
             this.length = length;
@@ -171,7 +173,7 @@ public class PageFile {
 
         @Override
         public String toString() {
-            return "[PageWrite:"+page.getPageId()+"]";
+            return "[PageWrite:"+page.getPageId()+ "-" + page.getType()  + "]";
         }
 
         @SuppressWarnings("unchecked")
@@ -184,7 +186,7 @@ public class PageFile {
                 diskBound = new byte[length];
                 RandomAccessFile file = new RandomAccessFile(tmpFile, "r");
                 file.seek(diskBoundLocation);
-                int readNum = file.read(diskBound);
+                file.read(diskBound);
                 file.close();
                 diskBoundLocation = -1;
             }
@@ -827,9 +829,7 @@ public class PageFile {
 
     public void freePage(long pageId) {
         freeList.add(pageId);
-        if( enablePageCaching ) {
-            pageCache.remove(pageId);
-        }
+        removeFromCache(pageId);
     }
     
     @SuppressWarnings("unchecked")
@@ -932,9 +932,9 @@ public class PageFile {
         }
     }
 
-    void removeFromCache(Page page) {
+    void removeFromCache(long pageId) {
         if (enablePageCaching) {
-            pageCache.remove(page.getPageId());
+            pageCache.remove(pageId);
         }
     }
 
@@ -1044,6 +1044,12 @@ public class PageFile {
                      // the write cache.
                      if (w.isDone()) {
                          writes.remove(w.page.getPageId());
+                         if (w.tmpFile != null && tmpFilesForRemoval.contains(w.tmpFile)) {
+                             if (!w.tmpFile.delete()) {
+                                 throw new IOException("Can't delete temporary KahaDB transaction file:" + w.tmpFile);
+                             }
+                             tmpFilesForRemoval.remove(w.tmpFile);
+                         }
                      }
                  }
              }
@@ -1053,6 +1059,10 @@ public class PageFile {
              }
          }
      }
+
+    public void removeTmpFile(File file) {
+        tmpFilesForRemoval.add(file);
+    }
 
     private long recoveryFileSizeForPages(int pageCount) {
         return RECOVERY_FILE_HEADER_SIZE+((pageSize+8)*pageCount);

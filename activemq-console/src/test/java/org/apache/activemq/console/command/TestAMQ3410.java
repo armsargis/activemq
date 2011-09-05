@@ -16,7 +16,6 @@
  */
 package org.apache.activemq.console.command;
 
-import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -34,40 +33,15 @@ import org.springframework.context.support.AbstractApplicationContext;
 import org.springframework.context.support.ClassPathXmlApplicationContext;
 
 public class TestAMQ3410 extends TestCase {
-	public static class InvalidFactory extends ActiveMQConnectionFactory {
-	}
-
-	public static class NotAFactory {
-	}
-
-	public static class DummyFactory extends ActiveMQConnectionFactory {
-		public DummyFactory() {
-			super();
-		}
-
-		public DummyFactory(String userName, String password, String brokerURL) {
-			super(userName, password, brokerURL);
-		}
-
-		public DummyFactory(String userName, String password, URI brokerURL) {
-			super(userName, password, brokerURL);
-		}
-
-		public DummyFactory(String brokerURL) {
-			super(brokerURL);
-		}
-
-		public DummyFactory(URI brokerURL) {
-			super(brokerURL);
-		}
-
-	};
-
+	@SuppressWarnings("unused")
 	private static final Logger LOG = LoggerFactory
 			.getLogger(TestPurgeCommand.class);
+	private static final Collection<String> DEFAULT_OPTIONS = Arrays
+			.asList(new String[] { "--amqurl", "tcp://localhost:61616", });
+
 	private static final Collection<String> DEFAULT_TOKENS = Arrays
-			.asList(new String[] { "--amqurl", "tcp://localhost:61616",
-					"FOO.QUEUE" });
+			.asList(new String[] { "FOO.QUEUE" });
+
 	protected AbstractApplicationContext context;
 
 	protected void setUp() throws Exception {
@@ -98,9 +72,12 @@ public class TestAMQ3410 extends TestCase {
 		command.setCommandContext(context);
 
 		List<String> tokens = new ArrayList<String>();
+		tokens.addAll(DEFAULT_OPTIONS);
 		tokens.addAll(DEFAULT_TOKENS);
+
 		command.execute(tokens);
-		assertNotNull(command.getFactory());
+		assertNotNull(command.getConnectionFactory());
+		assertTrue(command.getConnectionFactory() instanceof ActiveMQConnectionFactory);
 	}
 
 	public void testFactorySet() throws Exception {
@@ -112,12 +89,17 @@ public class TestAMQ3410 extends TestCase {
 		command.setCommandContext(context);
 
 		List<String> tokens = new ArrayList<String>();
-		tokens.addAll(DEFAULT_TOKENS);
+		tokens.addAll(DEFAULT_OPTIONS);
 		tokens.add("--factory");
-		tokens
-				.add("org.apache.activemq.console.command.TestAMQ3410.DummyFactory");
+		tokens.add(DummyConnectionFactory.class.getCanonicalName());
+		tokens.addAll(DEFAULT_TOKENS);
+
 		command.execute(tokens);
-		assertNotNull(command.getFactory());
+
+		assertNotNull(command.getConnectionFactory());
+		assertTrue("wrong instance returned: "
+				+ command.getConnectionFactory().getClass().getName(), command
+				.getConnectionFactory() instanceof DummyConnectionFactory);
 	}
 
 	public void testFactorySetWrong1() throws Exception {
@@ -129,12 +111,22 @@ public class TestAMQ3410 extends TestCase {
 		command.setCommandContext(context);
 
 		List<String> tokens = new ArrayList<String>();
-		tokens.addAll(DEFAULT_TOKENS);
+		tokens.addAll(DEFAULT_OPTIONS);
 		tokens.add("--factory");
 		tokens
 				.add("org.apache.activemq.console.command.TestAMQ3410.DoesntExistFactory");
+		tokens.addAll(DEFAULT_TOKENS);
+
+		try {
 		command.execute(tokens);
-		assertNotNull(command.getFactory());
+		} catch (Throwable cause) {
+			while (null != cause) {
+				if (cause instanceof java.lang.ClassNotFoundException)
+					return;
+				cause = cause.getCause();
+	}
+		}
+		assertFalse("No exception caught", true);
 	}
 
 	public void testFactorySetWrong2() throws Exception {
@@ -146,12 +138,49 @@ public class TestAMQ3410 extends TestCase {
 		command.setCommandContext(context);
 
 		List<String> tokens = new ArrayList<String>();
-		tokens.addAll(DEFAULT_TOKENS);
+		tokens.addAll(DEFAULT_OPTIONS);
 		tokens.add("--factory");
-		tokens
-				.add("org.apache.activemq.console.command.TestAMQ3410.InvalidFactory");
+		tokens.add(InvalidConnectionFactory.class.getCanonicalName());
+		tokens.addAll(DEFAULT_TOKENS);
+
+		try {
+			command.execute(tokens);
+		} catch (Throwable e) {
+			Throwable cause = e;
+			while (null != cause) {
+				if (cause instanceof java.lang.NoSuchMethodException)
+					return;
+				cause = cause.getCause();
+			}
+			assertFalse(e.toString(), true);
+		}
+		assertFalse("No exception caught", true);
+	}
+
+	public void testFactorySetWrong3() throws Exception {
+		AmqBrowseCommand command = new AmqBrowseCommand();
+		CommandContext context = new CommandContext();
+
+		context.setFormatter(new CommandShellOutputFormatter(System.out));
+
+		command.setCommandContext(context);
+
+		List<String> tokens = new ArrayList<String>();
+		tokens.addAll(DEFAULT_OPTIONS);
+		tokens.add("--factory");
+		tokens.add("java.lang.Object");
+		tokens.addAll(DEFAULT_TOKENS);
+
+		try {
 		command.execute(tokens);
-		assertNotNull(command.getFactory());
+		} catch (Throwable cause) {
+			while (null != cause) {
+				if (cause instanceof java.lang.NoSuchMethodException)
+					return;
+				cause = cause.getCause();
+	}
+		}
+		assertFalse(true);
 	}
 
 }

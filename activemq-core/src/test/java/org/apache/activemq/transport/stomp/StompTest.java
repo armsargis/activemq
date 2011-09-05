@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
 import javax.jms.BytesMessage;
 import javax.jms.Connection;
 import javax.jms.JMSException;
@@ -36,6 +37,7 @@ import javax.jms.ObjectMessage;
 import javax.jms.Session;
 import javax.jms.TextMessage;
 import javax.management.ObjectName;
+
 import org.apache.activemq.ActiveMQConnectionFactory;
 import org.apache.activemq.CombinationTestSupport;
 import org.apache.activemq.broker.BrokerFactory;
@@ -111,6 +113,7 @@ public class StompTest extends CombinationTestSupport {
         }
         broker = BrokerFactory.createBroker(new URI(confUri));
         broker.start();
+        broker.waitUntilStarted();
 
         stompConnect();
 
@@ -143,6 +146,7 @@ public class StompTest extends CombinationTestSupport {
             // Some tests explicitly disconnect from stomp so can ignore
         } finally {
             broker.stop();
+            broker.waitUntilStopped();
         }
     }
 
@@ -316,7 +320,7 @@ public class StompTest extends CombinationTestSupport {
         assertEquals("Hello World", message.getText());
         assertEquals("getJMSPriority", 4, message.getJMSPriority());
     }
-    
+
     public void testReceipts() throws Exception {
 
         StompConnection receiver = new StompConnection();
@@ -447,7 +451,7 @@ public class StompTest extends CombinationTestSupport {
 
     public void testSendMultipleBytesMessages() throws Exception {
 
-    	final int MSG_COUNT = 50;
+        final int MSG_COUNT = 50;
 
         String frame = "CONNECT\n" + "login: system\n" + "passcode: manager\n\n" + Stomp.NULL;
         stompConnection.sendFrame(frame);
@@ -565,6 +569,87 @@ public class StompTest extends CombinationTestSupport {
         frame = stompConnection.receiveFrame();
         assertTrue(frame.startsWith("MESSAGE"));
         assertTrue("Should have received the real message but got: " + frame, frame.indexOf("Real message") > 0);
+
+        frame = "DISCONNECT\n" + "\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+    }
+
+    public void testSubscribeWithAutoAckAndNumericSelector() throws Exception {
+
+        String frame = "CONNECT\n" + "login: system\n" + "passcode: manager\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        frame = stompConnection.receiveFrame();
+        assertTrue(frame.startsWith("CONNECTED"));
+
+        frame = "SUBSCRIBE\n" + "destination:/queue/" + getQueueName() + "\n" + "selector: foo = 42\n" + "ack:auto\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        // Ignored
+        frame = "SEND\n" + "foo:abc\n" + "destination:/queue/" + getQueueName() + "\n\n" + "Ignored Message" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        // Matches
+        frame = "SEND\n" + "foo:42\n" + "destination:/queue/" + getQueueName() + "\n\n" + "Real Message" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        frame = stompConnection.receiveFrame();
+        assertTrue(frame.startsWith("MESSAGE"));
+        assertTrue("Should have received the real message but got: " + frame, frame.indexOf("Real Message") > 0);
+
+        frame = "DISCONNECT\n" + "\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+    }
+
+    public void testSubscribeWithAutoAckAndBooleanSelector() throws Exception {
+
+        String frame = "CONNECT\n" + "login: system\n" + "passcode: manager\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        frame = stompConnection.receiveFrame();
+        assertTrue(frame.startsWith("CONNECTED"));
+
+        frame = "SUBSCRIBE\n" + "destination:/queue/" + getQueueName() + "\n" + "selector: foo = true\n" + "ack:auto\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        // Ignored
+        frame = "SEND\n" + "foo:false\n" + "destination:/queue/" + getQueueName() + "\n\n" + "Ignored Message" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        // Matches
+        frame = "SEND\n" + "foo:true\n" + "destination:/queue/" + getQueueName() + "\n\n" + "Real Message" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        frame = stompConnection.receiveFrame();
+        assertTrue(frame.startsWith("MESSAGE"));
+        assertTrue("Should have received the real message but got: " + frame, frame.indexOf("Real Message") > 0);
+
+        frame = "DISCONNECT\n" + "\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+    }
+
+    public void testSubscribeWithAutoAckAnFloatSelector() throws Exception {
+
+        String frame = "CONNECT\n" + "login: system\n" + "passcode: manager\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        frame = stompConnection.receiveFrame();
+        assertTrue(frame.startsWith("CONNECTED"));
+
+        frame = "SUBSCRIBE\n" + "destination:/queue/" + getQueueName() + "\n" + "selector: foo = 3.14159\n" + "ack:auto\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        // Ignored
+        frame = "SEND\n" + "foo:6.578\n" + "destination:/queue/" + getQueueName() + "\n\n" + "Ignored Message" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        // Matches
+        frame = "SEND\n" + "foo:3.14159\n" + "destination:/queue/" + getQueueName() + "\n\n" + "Real Message" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        frame = stompConnection.receiveFrame();
+        assertTrue(frame.startsWith("MESSAGE"));
+        assertTrue("Should have received the real message but got: " + frame, frame.indexOf("Real Message") > 0);
 
         frame = "DISCONNECT\n" + "\n\n" + Stomp.NULL;
         stompConnection.sendFrame(frame);
@@ -1437,7 +1522,6 @@ public class StompTest extends CombinationTestSupport {
         headers.put(Stomp.Headers.Message.EXPIRATION_TIME, String.valueOf(timestamp));
         headers.put(Stomp.Headers.Send.PERSISTENT, "true");
 
-
         stompConnection.send("/queue/" + getQueueName(), "msg", null, headers);
 
         stompConnection.subscribe("/queue/ActiveMQ.DLQ");
@@ -1446,8 +1530,73 @@ public class StompTest extends CombinationTestSupport {
         assertEquals(stompMessage.getHeaders().get(Stomp.Headers.Message.ORIGINAL_DESTINATION), "/queue/" + getQueueName());
     }
 
+    public void testPersistent() throws Exception {
+        stompConnection.connect("system", "manager");
+
+        HashMap<String, String> headers = new HashMap<String, String>();
+        headers.put(Stomp.Headers.Message.PERSISTENT, "true");
+
+        stompConnection.send("/queue/" + getQueueName(), "hello", null, headers);
+
+        stompConnection.subscribe("/queue/" + getQueueName());
+
+        StompFrame stompMessage = stompConnection.receive();
+        assertNotNull(stompMessage);
+        assertNotNull(stompMessage.getHeaders().get(Stomp.Headers.Message.PERSISTENT));
+        assertEquals(stompMessage.getHeaders().get(Stomp.Headers.Message.PERSISTENT), "true");
+    }
+
+    public void testPersistentDefaultValue() throws Exception {
+        stompConnection.connect("system", "manager");
+
+        HashMap<String, String> headers = new HashMap<String, String>();
+
+        stompConnection.send("/queue/" + getQueueName(), "hello", null, headers);
+
+        stompConnection.subscribe("/queue/" + getQueueName());
+
+        StompFrame stompMessage = stompConnection.receive();
+        assertNotNull(stompMessage);
+        assertNull(stompMessage.getHeaders().get(Stomp.Headers.Message.PERSISTENT));
+    }
+    
+    public void testReceiptNewQueue() throws Exception {
+    	
+        String frame = "CONNECT\n" + "login: system\n" + "passcode: manager\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        frame = stompConnection.receiveFrame();
+        assertTrue(frame.startsWith("CONNECTED"));
+        
+        frame = "SUBSCRIBE\n" + "destination:/queue/" + getQueueName() + 1234 + "\n" + "id:8fee4b8-4e5c9f66-4703-e936-3" + "\n" + "receipt:8fee4b8-4e5c9f66-4703-e936-2" + "\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+        
+        StompFrame receipt = stompConnection.receive();
+        assertTrue(receipt.getAction().startsWith("RECEIPT"));
+        assertEquals("8fee4b8-4e5c9f66-4703-e936-2", receipt.getHeaders().get("receipt-id"));
 
 
+        frame = "SEND\n destination:/queue/" + getQueueName() + 123 + "\ncontent-length:0" + " \n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+
+        frame = "SUBSCRIBE\n" + "destination:/queue/" + getQueueName() + 123 + "\n" + "id:8fee4b8-4e5c9f66-4703-e936-2" + "\n" + "receipt:8fee4b8-4e5c9f66-4703-e936-1" + "\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+        
+        receipt = stompConnection.receive();
+        assertTrue(receipt.getAction().startsWith("RECEIPT"));
+        assertEquals("8fee4b8-4e5c9f66-4703-e936-1", receipt.getHeaders().get("receipt-id"));
+
+        StompFrame message = stompConnection.receive();
+        assertTrue(message.getAction().startsWith("MESSAGE"));
+
+        String length = message.getHeaders().get("content-length");
+        assertEquals("0", length);
+        assertEquals(0, message.getContent().length);
+
+        frame = "DISCONNECT\n" + "\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+    }
 
     protected void assertClients(int expected) throws Exception {
         org.apache.activemq.broker.Connection[] clients = broker.getBroker().getClients();

@@ -21,6 +21,8 @@ import javax.management.openmbean.OpenDataException;
 import javax.management.openmbean.TabularData;
 
 import org.apache.activemq.broker.ConnectionContext;
+import org.apache.activemq.broker.region.Subscription;
+import org.apache.activemq.command.ConsumerInfo;
 import org.apache.activemq.command.RemoveSubscriptionInfo;
 import org.apache.activemq.command.SubscriptionInfo;
 
@@ -36,12 +38,12 @@ public class InactiveDurableSubscriptionView extends DurableSubscriptionView imp
      * 
      * @param broker
      * @param clientId
-     * @param sub
+     * @param subInfo
      */
-    public InactiveDurableSubscriptionView(ManagedRegionBroker broker, String clientId, SubscriptionInfo sub) {
-        super(broker,clientId, null);
+    public InactiveDurableSubscriptionView(ManagedRegionBroker broker, String clientId, SubscriptionInfo subInfo, Subscription subscription) {
+        super(broker,clientId, subscription);
         this.broker = broker;
-        this.subscriptionInfo = sub;
+        this.subscriptionInfo = subInfo;
     }
 
     /**
@@ -94,6 +96,12 @@ public class InactiveDurableSubscriptionView extends DurableSubscriptionView imp
         return false;
     }
 
+    @Override
+    protected ConsumerInfo getConsumerInfo() {
+        // when inactive, consumer info is stale
+        return null;
+    }
+
     /**
      * Browse messages for this durable subscriber
      * 
@@ -130,5 +138,10 @@ public class InactiveDurableSubscriptionView extends DurableSubscriptionView imp
 
     public String toString() {
         return "InactiveDurableSubscriptionView: " + getClientId() + ":" + getSubscriptionName();
+    }
+
+    @Override
+    public String getSelector() {
+        return subscriptionInfo.getSelector();
     }
 }

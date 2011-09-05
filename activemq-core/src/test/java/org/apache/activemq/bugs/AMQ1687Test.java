@@ -29,8 +29,8 @@ import org.apache.activemq.command.ActiveMQTopic;
 import org.apache.activemq.spring.ConsumerBean;
 
 /**
- * 
- * 
+ *
+ *
  */
 public class AMQ1687Test extends EmbeddedBrokerTestSupport {
 
@@ -39,11 +39,10 @@ public class AMQ1687Test extends EmbeddedBrokerTestSupport {
     @Override
     protected ConnectionFactory createConnectionFactory() throws Exception {
         //prefetch change is not required, but test will not fail w/o it, only spew errors in the AMQ log.
-        return new ActiveMQConnectionFactory(this.bindAddress+"?jms.prefetchPolicy.all=5");
-        //return super.createConnectionFactory();
-        //return new ActiveMQConnectionFactory("tcp://localhost:61616");
+        return new ActiveMQConnectionFactory(
+                broker.getTransportConnectors().get(0).getPublishableConnectString() +"?jms.prefetchPolicy.all=5");
     }
-    
+
     public void testVirtualTopicCreation() throws Exception {
         if (connection == null) {
             connection = createConnection();
@@ -52,10 +51,10 @@ public class AMQ1687Test extends EmbeddedBrokerTestSupport {
 
         ConsumerBean messageList = new ConsumerBean();
         messageList.setVerbose(true);
-        
+
         String queueAName = getVirtualTopicConsumerName();
         String queueBName = getVirtualTopicConsumerNameB();
-        
+
         // create consumer 'cluster'
         ActiveMQQueue queue1 = new ActiveMQQueue(queueAName);
         ActiveMQQueue queue2 = new ActiveMQQueue(queueBName);
@@ -76,15 +75,13 @@ public class AMQ1687Test extends EmbeddedBrokerTestSupport {
         for (int i = 0; i < total; i++) {
             producer.send(session.createTextMessage("message: " + i));
         }
-        
+
         messageList.assertMessagesArrived(total*2);
     }
-
 
     protected String getVirtualTopicName() {
         return "VirtualTopic.TEST";
     }
-
 
     protected String getVirtualTopicConsumerName() {
         return "Consumer.A.VirtualTopic.TEST";
@@ -93,10 +90,9 @@ public class AMQ1687Test extends EmbeddedBrokerTestSupport {
     protected String getVirtualTopicConsumerNameB() {
         return "Consumer.B.VirtualTopic.TEST";
     }
-    
-    
+
     protected void setUp() throws Exception {
-        this.bindAddress="tcp://localhost:61616";
+        this.bindAddress="tcp://localhost:0";
         super.setUp();
     }
     protected void tearDown() throws Exception {

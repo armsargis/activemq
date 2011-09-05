@@ -54,6 +54,7 @@ import org.apache.activemq.broker.region.group.MessageGroupMap;
 import org.apache.activemq.broker.region.group.MessageGroupMapFactory;
 import org.apache.activemq.broker.region.policy.DispatchPolicy;
 import org.apache.activemq.broker.region.policy.RoundRobinDispatchPolicy;
+import org.apache.activemq.broker.util.InsertionCountList;
 import org.apache.activemq.command.*;
 import org.apache.activemq.filter.BooleanExpression;
 import org.apache.activemq.filter.MessageEvaluationContext;
@@ -475,7 +476,9 @@ public class Queue extends BaseDestination implements Task, UsageListener {
                         if (ref.getMessageId().getBrokerSequenceId() == lastDeiveredSequenceId) {
                             lastDeliveredRef = ref;
                             markAsRedelivered = true;
-                            LOG.debug("found lastDeliveredSeqID: " + lastDeiveredSequenceId + ", message reference: " + ref.getMessageId());
+                            if (LOG.isDebugEnabled()) {
+                                LOG.debug("found lastDeliveredSeqID: " + lastDeiveredSequenceId + ", message reference: " + ref.getMessageId());
+                            }
                             break;
                         }
                     }
@@ -755,24 +758,7 @@ public class Queue extends BaseDestination implements Task, UsageListener {
         }
 
         // just track the insertion count
-        List<Message> browsedMessages = new AbstractList<Message>() {
-            int size = 0;
-
-            @Override
-            public void add(int index, Message element) {
-                size++;
-            }
-
-            @Override
-            public int size() {
-                return size;
-            }
-
-            @Override
-            public Message get(int index) {
-                return null;
-            }
-        };
+        List<Message> browsedMessages = new InsertionCountList<Message>();
         doBrowse(browsedMessages, this.getMaxExpirePageSize());
         asyncWakeup();
         if (LOG.isDebugEnabled()) {
@@ -984,7 +970,9 @@ public class Queue extends BaseDestination implements Task, UsageListener {
                 for (MessageReference ref : toExpire) {
                     pagedInPendingDispatch.remove(ref);
                     if (broker.isExpired(ref)) {
-                        LOG.debug("expiring from pagedInPending: " + ref);
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug("expiring from pagedInPending: " + ref);
+                        }
                         messageExpired(connectionContext, ref);
                     }
                 }
@@ -1000,7 +988,9 @@ public class Queue extends BaseDestination implements Task, UsageListener {
             }
             for (MessageReference ref : toExpire) {
                 if (broker.isExpired(ref)) {
-                    LOG.debug("expiring from pagedInMessages: " + ref);
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("expiring from pagedInMessages: " + ref);
+                    }
                     messageExpired(connectionContext, ref);
                 } else {
                     pagedInMessagesLock.writeLock().lock();
@@ -1021,7 +1011,9 @@ public class Queue extends BaseDestination implements Task, UsageListener {
                             MessageReference node = messages.next();
                             if (node.isExpired()) {
                                 if (broker.isExpired(node)) {
-                                    LOG.debug("expiring from messages: " + node);
+                                    if (LOG.isDebugEnabled()) {
+                                        LOG.debug("expiring from messages: " + node);
+                                    }
                                     messageExpired(connectionContext, createMessageReference(node.getMessage()));
                                 }
                                 messages.remove();

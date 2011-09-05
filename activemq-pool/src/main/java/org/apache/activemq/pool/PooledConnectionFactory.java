@@ -31,6 +31,7 @@ import org.apache.activemq.util.IOExceptionSupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.commons.pool.ObjectPoolFactory;
+import org.apache.commons.pool.impl.GenericObjectPool;
 import org.apache.commons.pool.impl.GenericObjectPoolFactory;
 
 /**
@@ -39,23 +40,23 @@ import org.apache.commons.pool.impl.GenericObjectPoolFactory;
  * href="http://activemq.apache.org/spring-support.html">JmsTemplate and MessagListenerContainer</a>.
  * Connections, sessions and producers are returned to a pool after use so that they can be reused later
  * without having to undergo the cost of creating them again.
- * 
+ *
  * b>NOTE:</b> while this implementation does allow the creation of a collection of active consumers,
- * it does not 'pool' consumers. Pooling makes sense for connections, sessions and producers, which 
+ * it does not 'pool' consumers. Pooling makes sense for connections, sessions and producers, which
  * are expensive to create and can remain idle a minimal cost. Consumers, on the other hand, are usually
  * just created at startup and left active, handling incoming messages as they come. When a consumer is
- * complete, it is best to close it rather than return it to a pool for later reuse: this is because, 
+ * complete, it is best to close it rather than return it to a pool for later reuse: this is because,
  * even if a consumer is idle, ActiveMQ will keep delivering messages to the consumer's prefetch buffer,
  * where they'll get held until the consumer is active again.
- * 
+ *
  * If you are creating a collection of consumers (for example, for multi-threaded message consumption), you
- * might want to consider using a lower prefetch value for each consumer (e.g. 10 or 20), to ensure that 
- * all messages don't end up going to just one of the consumers. See this FAQ entry for more detail: 
+ * might want to consider using a lower prefetch value for each consumer (e.g. 10 or 20), to ensure that
+ * all messages don't end up going to just one of the consumers. See this FAQ entry for more detail:
  * http://activemq.apache.org/i-do-not-receive-messages-in-my-second-consumer.html
- * 
+ *
  * @org.apache.xbean.XBean element="pooledConnectionFactory"
- * 
- * 
+ *
+ *
  */
 public class PooledConnectionFactory implements ConnectionFactory, Service {
     private static final transient Logger LOG = LoggerFactory.getLogger(PooledConnectionFactory.class);
@@ -65,6 +66,7 @@ public class PooledConnectionFactory implements ConnectionFactory, Service {
     private int maximumActive = 500;
     private int maxConnections = 1;
     private int idleTimeout = 30 * 1000;
+    private boolean blockIfSessionPoolIsFull = true;
     private AtomicBoolean stopped = new AtomicBoolean(false);
     private long expiryTimeout = 0l;
 
@@ -97,7 +99,7 @@ public class PooledConnectionFactory implements ConnectionFactory, Service {
             LOG.debug("PooledConnectionFactory is stopped, skip create new connection.");
             return null;
         }
-        
+
         ConnectionKey key = new ConnectionKey(userName, password);
         LinkedList<ConnectionPool> pools = cache.get(key);
 
@@ -195,6 +197,22 @@ public class PooledConnectionFactory implements ConnectionFactory, Service {
     }
 
     /**
+     * Controls the behavior of the internal session pool. By default the call to
+     * Connection.getSession() will block if the session pool is full.  If the
+     * argument false is given, it will change the default behavior and instead the
+     * call to getSession() will throw a JMSException.
+     *
+     * The size of the session pool is controlled by the @see #maximumActive
+     * property.
+     *
+     * @param block - if true, the call to getSession() blocks if the pool is full
+     * until a session object is available.  defaults to true.
+     */
+    public void setBlockIfSessionPoolIsFull(boolean block) {
+        this.blockIfSessionPoolIsFull = block;
+    }
+
+    /**
      * @return the maxConnections
      */
     public int getMaxConnections() {
@@ -208,8 +226,21 @@ public class PooledConnectionFactory implements ConnectionFactory, Service {
         this.maxConnections = maxConnections;
     }
 
+    /**
+     * Creates an ObjectPoolFactory. Its behavior is controlled by the two
+     * properties @see #maximumActive and @see #blockIfSessionPoolIsFull.
+     *
+     * @return the newly created but empty ObjectPoolFactory
+     */
     protected ObjectPoolFactory createPoolFactory() {
-        return new GenericObjectPoolFactory(null, maximumActive);
+         if (blockIfSessionPoolIsFull) {
+            return new GenericObjectPoolFactory(null, maximumActive);
+        } else {
+            return new GenericObjectPoolFactory(null,
+                maximumActive,
+                GenericObjectPool.WHEN_EXHAUSTED_FAIL,
+                GenericObjectPool.DEFAULT_MAX_WAIT);
+        }
     }
 
     public int getIdleTimeout() {
@@ -223,13 +254,13 @@ public class PooledConnectionFactory implements ConnectionFactory, Service {
     /**
      * allow connections to expire, irrespective of load or idle time. This is useful with failover
      * to force a reconnect from the pool, to reestablish load balancing or use of the master post recovery
-     * 
+     *
      * @param expiryTimeout non zero in milliseconds
      */
     public void setExpiryTimeout(long expiryTimeout) {
-        this.expiryTimeout = expiryTimeout;   
+        this.expiryTimeout = expiryTimeout;
     }
-    
+
     public long getExpiryTimeout() {
         return expiryTimeout;
     }

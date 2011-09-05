@@ -45,6 +45,11 @@ public class AmqBrowseCommand extends AbstractAmqCommand {
         "    --amqurl <url>                Set the broker URL to connect to.",
         "    --msgsel <msgsel1,msglsel2>   Add to the search list messages matched by the query similar to",
         "                                  the messages selector format.",
+        "    --factory <className>         Load className as the javax.jms.ConnectionFactory to use for creating connections.",
+        "    --passwordFactory <className> Load className as the org.apache.activemq.console.command.PasswordFactory",
+        "                                  for retrieving the password from a keystore.",
+        "    --user <username>             Username to use for JMS connections.",
+        "    --password <password>         Password to use for JMS connections.",
         "    -V<header|custom|body>        Predefined view that allows you to view the message header, custom",
         "                                  message header, or the message body.",
         "    --view <attr1>,<attr2>,...    Select the specific attribute of the message to view.",
@@ -66,6 +71,15 @@ public class AmqBrowseCommand extends AbstractAmqCommand {
         "        - Print all the message fields that has a JMSMessageID in the header field that matches the",
         "          wildcard *:10, and has a JMSPriority field > 5 in the queue FOO.BAR",
         "        * To use wildcard queries, the field must be a string and the query enclosed in ''",
+        "",
+        "    Main browse --amqurl tcp://localhost:61616 --user someUser --pass somePass FOO.BAR",
+        "        - Print the message header, custom message header, and message body of all messages in the",
+        "          queue FOO.BAR, using someUser as the user name, and somePass as the password",
+        "",
+        "    Main browse --amqurl tcp://localhost:61616 --user someUser --pass somePass --factory org.apache.activemq.ActiveMQConnectionFactory --passwordFactory org.apache.activemq.AMQPasswordFactory FOO.BAR",
+        "        - Print the message header, custom message header, and message body of all messages in the",
+        "          queue FOO.BAR, using someUser as the user name, org.apache.activemq.AMQFactorySubClass to create JMS connections,",
+        "          and org.apache.activemq.console.command.DefaultPasswordFactory to turn somePass into the password to be used.",
         "",
     };
 
@@ -114,11 +128,11 @@ public class AmqBrowseCommand extends AbstractAmqCommand {
                 }
 
                 // Query for the messages to view
-                List addMsgs = AmqMessagesUtil.getMessages(getBrokerUrl(), dest, queryAddObjects);
+                List addMsgs = AmqMessagesUtil.getMessages(getConnectionFactory(), dest, queryAddObjects);
 
                 // Query for the messages to remove from view
                 if (querySubObjects.size() > 0) {
-                    List subMsgs = AmqMessagesUtil.getMessages(getBrokerUrl(), dest, querySubObjects);
+                    List subMsgs = AmqMessagesUtil.getMessages(getConnectionFactory(), dest, querySubObjects);
                     addMsgs.removeAll(subMsgs);
                 }
 

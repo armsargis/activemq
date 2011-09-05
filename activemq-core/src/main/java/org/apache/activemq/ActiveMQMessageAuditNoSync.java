@@ -189,6 +189,17 @@ public class ActiveMQMessageAuditNoSync implements Serializable {
             }
         }
     }
+
+    public void rollback(final String id) {
+        String seed = IdGenerator.getSeedFromId(id);
+        if (seed != null) {
+            BitArrayBin bab = map.get(seed);
+            if (bab != null) {
+                long index = IdGenerator.getSequenceFromId(id);
+                bab.setBit(index, false);
+            }
+        }
+    }
     
     /**
      * Check the message is in order
@@ -256,7 +267,7 @@ public class ActiveMQMessageAuditNoSync implements Serializable {
 
     public long getLastSeqId(ProducerId id) {
         long result = -1;
-        BitArrayBin bab = map.get(id.toString() + ":");
+        BitArrayBin bab = map.get(id.toString());
         if (bab != null) {
             result = bab.getLastSetIndex();
         }
