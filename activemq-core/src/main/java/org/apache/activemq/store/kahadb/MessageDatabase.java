@@ -28,13 +28,9 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.apache.activemq.ActiveMQMessageAuditNoSync;
 import org.apache.activemq.broker.BrokerService;
 import org.apache.activemq.broker.BrokerServiceAware;
-import org.apache.activemq.command.ActiveMQDestination;
-import org.apache.activemq.command.ConnectionId;
-import org.apache.activemq.command.LocalTransactionId;
 import org.apache.activemq.command.MessageAck;
 import org.apache.activemq.command.SubscriptionInfo;
 import org.apache.activemq.command.TransactionId;
-import org.apache.activemq.command.XATransactionId;
 import org.apache.activemq.protobuf.Buffer;
 import org.apache.activemq.store.kahadb.data.*;
 import org.apache.activemq.util.Callback;
@@ -43,6 +39,7 @@ import org.apache.activemq.util.ServiceStopper;
 import org.apache.activemq.util.ServiceSupport;
 import org.apache.kahadb.index.BTreeIndex;
 import org.apache.kahadb.index.BTreeVisitor;
+import org.apache.kahadb.index.ListIndex;
 import org.apache.kahadb.journal.DataFile;
 import org.apache.kahadb.journal.Journal;
 import org.apache.kahadb.journal.Location;
@@ -53,19 +50,17 @@ import org.apache.kahadb.util.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class MessageDatabase extends ServiceSupport implements BrokerServiceAware {
+public abstract class MessageDatabase extends ServiceSupport implements BrokerServiceAware {
 
     protected BrokerService brokerService;
 
     public static final String PROPERTY_LOG_SLOW_ACCESS_TIME = "org.apache.activemq.store.kahadb.LOG_SLOW_ACCESS_TIME";
     public static final int LOG_SLOW_ACCESS_TIME = Integer.parseInt(System.getProperty(PROPERTY_LOG_SLOW_ACCESS_TIME, "0"));
-
+    public static final File DEFAULT_DIRECTORY = new File("KahaDB");
     protected static final Buffer UNMATCHED;
-
     static {
         UNMATCHED = new Buffer(new byte[]{});
     }
-
     private static final Logger LOG = LoggerFactory.getLogger(MessageDatabase.class);
     private static final int DEFAULT_DATABASE_LOCKED_WAIT_DELAY = 10 * 1000;
 
@@ -74,7 +69,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
     static final long NOT_ACKED = -1;
     static final long UNMATCHED_SEQ = -2;
 
-    static final int VERSION = 3;
+    static final int VERSION = 4;
 
     protected class Metadata {
         protected Page<Metadata> page;
@@ -85,7 +80,6 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         protected Location producerSequenceIdTrackerLocation = null;
         protected transient ActiveMQMessageAuditNoSync producerSequenceIdTracker = new ActiveMQMessageAuditNoSync();
         protected int version = VERSION;
-
         public void read(DataInput is) throws IOException {
             state = is.readInt();
             destinations = new BTreeIndex<String, StoredDestination>(pageFile, is.readLong());
@@ -108,9 +102,9 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
             } catch (EOFException expectedOnUpgrade) {
             }
             try {
-                version = is.readInt();
+               version = is.readInt();
             } catch (EOFException expectedOnUpgrade) {
-                version = 1;
+                version=1;
             }
             LOG.info("KahaDB is version " + version);
         }
@@ -156,7 +150,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
     }
 
     protected PageFile pageFile;
-    protected JournalManager journalManager;
+    protected Journal journal;
     protected Metadata metadata = new Metadata();
 
     protected MetadataMarshaller metadataMarshaller = new MetadataMarshaller();
@@ -164,19 +158,18 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
     protected boolean failIfDatabaseIsLocked;
 
     protected boolean deleteAllMessages;
-    protected File directory = new File("KahaDB");
+    protected File directory = DEFAULT_DIRECTORY;
     protected Thread checkpointThread;
-    protected boolean enableJournalDiskSyncs = true;
+    protected boolean enableJournalDiskSyncs=true;
     protected boolean archiveDataLogs;
     protected File directoryArchive;
     protected AtomicLong storeSize = new AtomicLong(0);
-    long checkpointInterval = 5 * 1000;
-    long cleanupInterval = 30 * 1000;
+    long checkpointInterval = 5*1000;
+    long cleanupInterval = 30*1000;
     int journalMaxFileLength = Journal.DEFAULT_MAX_FILE_LENGTH;
     int journalMaxWriteBatchSize = Journal.DEFAULT_MAX_WRITE_BATCH_SIZE;
     boolean enableIndexWriteAsync = false;
     int setIndexWriteBatchSize = PageFile.DEFAULT_WRITE_BATCH_SIZE;
-
 
     protected AtomicBoolean opened = new AtomicBoolean();
     private LockFile lockFile;
@@ -187,8 +180,10 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
     private int databaseLockedWaitDelay = DEFAULT_DATABASE_LOCKED_WAIT_DELAY;
     protected boolean forceRecoverIndex = false;
     private final Object checkpointThreadLock = new Object();
-    private boolean journalPerDestination = false;
-
+    private boolean rewriteOnRedelivery = false;
+    private boolean archiveCorruptedIndex = false;
+    private boolean useIndexLFRUEviction = false;
+    private float indexLFUEvictionFactor = 0.2f;
 
     public MessageDatabase() {
     }
@@ -235,9 +230,9 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
             storedDestinations.clear();
             pageFile.tx().execute(new Transaction.Closure<IOException>() {
                 public void execute(Transaction tx) throws IOException {
-                    for (Iterator<Entry<String, StoredDestination>> iterator = metadata.destinations.iterator(tx); iterator.hasNext(); ) {
+                    for (Iterator<Entry<String, StoredDestination>> iterator = metadata.destinations.iterator(tx); iterator.hasNext();) {
                         Entry<String, StoredDestination> entry = iterator.next();
-                        StoredDestination sd = loadStoredDestination(tx, entry.getKey(), entry.getValue().subscriptions != null);
+                        StoredDestination sd = loadStoredDestination(tx, entry.getKey(), entry.getValue().subscriptions!=null);
                         storedDestinations.put(entry.getKey(), sd);
                     }
                 }
@@ -270,11 +265,11 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                             while (opened.get()) {
                                 Thread.sleep(sleepTime);
                                 long now = System.currentTimeMillis();
-                                if (now - lastCleanup >= cleanupInterval) {
+                                if( now - lastCleanup >= cleanupInterval ) {
                                     checkpointCleanup(true);
                                     lastCleanup = now;
                                     lastCheckpoint = now;
-                                } else if (now - lastCheckpoint >= checkpointInterval) {
+                                } else if( now - lastCheckpoint >= checkpointInterval ) {
                                     checkpointCleanup(false);
                                     lastCheckpoint = now;
                                 }
@@ -295,9 +290,23 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
     }
 
     public void open() throws IOException {
-        if (opened.compareAndSet(false, true)) {
-            getJournalManager().start();
-            loadPageFile();
+        if( opened.compareAndSet(false, true) ) {
+            getJournal().start();
+            try {
+                loadPageFile();
+            } catch (IOException ioe) {
+                LOG.warn("Index corrupted, trying to recover ...", ioe);
+                // try to recover index
+                try {
+                    pageFile.unload();
+                } catch (Exception ignore) {}
+                if (archiveCorruptedIndex) {
+                    pageFile.archive();
+                } else {
+                    pageFile.delete();
+                }
+                loadPageFile();
+            }
             startCheckpoint();
             recover();
         }
@@ -343,60 +352,56 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
     }
 
     public void load() throws IOException {
-
         this.indexLock.writeLock().lock();
         try {
             lock();
             if (deleteAllMessages) {
-                getJournalManager().start();
-                getJournalManager().delete();
-                getJournalManager().close();
-                journalManager = null;
+                getJournal().start();
+                getJournal().delete();
+                getJournal().close();
+                journal = null;
                 getPageFile().delete();
                 LOG.info("Persistence store purged.");
                 deleteAllMessages = false;
             }
 
             open();
-            for (Journal journal : getJournalManager().getJournals()) {
-                store(journal, new KahaTraceCommand().setMessage("LOADED " + new Date()));
-            }
+            store(new KahaTraceCommand().setMessage("LOADED " + new Date()));
         } finally {
             this.indexLock.writeLock().unlock();
         }
-
     }
 
-
     public void close() throws IOException, InterruptedException {
-        if (opened.compareAndSet(true, false)) {
-            this.indexLock.writeLock().lock();
+        if( opened.compareAndSet(true, false)) {
             try {
-                pageFile.tx().execute(new Transaction.Closure<IOException>() {
-                    public void execute(Transaction tx) throws IOException {
-                        for (Journal journal : getJournalManager().getJournals()) {
-                            checkpointUpdate(tx, journal, true);
+                this.indexLock.writeLock().lock();
+                try {
+                    pageFile.tx().execute(new Transaction.Closure<IOException>() {
+                        public void execute(Transaction tx) throws IOException {
+                            checkpointUpdate(tx, true);
                         }
-                    }
-                });
-                pageFile.unload();
-                metadata = new Metadata();
+                    });
+                    pageFile.unload();
+                    metadata = new Metadata();
+                } finally {
+                    this.indexLock.writeLock().unlock();
+                }
+                journal.close();
+                synchronized (checkpointThreadLock) {
+                    checkpointThread.join();
+                }
             } finally {
-                this.indexLock.writeLock().unlock();
+                lockFile.unlock();
+                lockFile=null;
             }
-            journalManager.close();
-            synchronized (checkpointThreadLock) {
-                checkpointThread.join();
-            }
-            lockFile.unlock();
-            lockFile = null;
         }
     }
 
     public void unload() throws IOException, InterruptedException {
         this.indexLock.writeLock().lock();
         try {
-            if (pageFile != null && pageFile.isLoaded()) {
+            if( pageFile != null && pageFile.isLoaded() ) {
                 metadata.state = CLOSED_STATE;
                 metadata.firstInProgressTransactionLocation = getFirstInProgressTxLocation();
 
@@ -413,16 +418,27 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
     }
 
     // public for testing
+    @SuppressWarnings("rawtypes")
     public Location getFirstInProgressTxLocation() {
         Location l = null;
         synchronized (inflightTransactions) {
             if (!inflightTransactions.isEmpty()) {
-                l = inflightTransactions.values().iterator().next().get(0).getLocation();
+                for (List<Operation> ops : inflightTransactions.values()) {
+                    if (!ops.isEmpty()) {
+                        l = ops.get(0).getLocation();
+                        break;
+                    }
+                }
             }
             if (!preparedTransactions.isEmpty()) {
-                Location t = preparedTransactions.values().iterator().next().get(0).getLocation();
-                if (l == null || t.compareTo(l) <= 0) {
-                    l = t;
+                for (List<Operation> ops : preparedTransactions.values()) {
+                    if (!ops.isEmpty()) {
+                        Location t = ops.get(0).getLocation();
+                        if (l==null || t.compareTo(l) <= 0) {
+                            l = t;
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -432,65 +448,75 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
     /**
      * Move all the messages that were in the journal into long term storage. We
      * just replay and do a checkpoint.
+     *
+     * @throws IOException
+     * @throws IOException
+     * @throws IllegalStateException
      */
     private void recover() throws IllegalStateException, IOException {
         this.indexLock.writeLock().lock();
         try {
-            for (Journal journal : getJournalManager().getJournals()) {
-                recover(journal);
+
+            long start = System.currentTimeMillis();
+            Location producerAuditPosition = recoverProducerAudit();
+            Location lastIndoubtPosition = getRecoveryPosition();
+
+            Location recoveryPosition = minimum(producerAuditPosition, lastIndoubtPosition);
+
+            if (recoveryPosition != null) {
+                int redoCounter = 0;
+                LOG.info("Recovering from the journal ...");
+                while (recoveryPosition != null) {
+                    JournalCommand<?> message = load(recoveryPosition);
+                    metadata.lastUpdate = recoveryPosition;
+                    process(message, recoveryPosition, lastIndoubtPosition);
+                    redoCounter++;
+                    recoveryPosition = journal.getNextLocation(recoveryPosition);
+                     if (LOG.isInfoEnabled() && redoCounter % 100000 == 0) {
+                         LOG.info("@" + recoveryPosition +  ", "  + redoCounter + " entries recovered ..");
+                     }
+                }
+                if (LOG.isInfoEnabled()) {
+                    long end = System.currentTimeMillis();
+                    LOG.info("Recovery replayed " + redoCounter + " operations from the journal in " + ((end - start) / 1000.0f) + " seconds.");
+                }
+            }
+
+            // We may have to undo some index updates.
+            pageFile.tx().execute(new Transaction.Closure<IOException>() {
+                public void execute(Transaction tx) throws IOException {
+                    recoverIndex(tx);
+                }
+            });
+
+            // rollback any recovered inflight local transactions
+            Set<TransactionId> toRollback = new HashSet<TransactionId>();
+            synchronized (inflightTransactions) {
+                for (Iterator<TransactionId> it = inflightTransactions.keySet().iterator(); it.hasNext(); ) {
+                    TransactionId id = it.next();
+                    if (id.isLocalTransaction()) {
+                        toRollback.add(id);
+                    }
+                }
+                for (TransactionId tx: toRollback) {
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("rolling back recovered indoubt local transaction " + tx);
+                    }
+                    store(new KahaRollbackCommand().setTransactionInfo(TransactionIdConversion.convertToLocal(tx)), false, null, null);
+                }
             }
         } finally {
             this.indexLock.writeLock().unlock();
         }
     }
 
-    private void recover(final Journal journal) throws IllegalStateException, IOException {
-
-        long start = System.currentTimeMillis();
-        Location producerAuditPosition = recoverProducerAudit(journal);
-        Location lastIndoubtPosition = getRecoveryPosition(journal);
-
-        Location recoveryPosition = minimum(producerAuditPosition, lastIndoubtPosition);
-
-        if (recoveryPosition != null) {
-            int redoCounter = 0;
-            LOG.info("Recovering from the journal ...");
-            while (recoveryPosition != null) {
-                JournalCommand<?> message = load(journal, recoveryPosition);
-                metadata.lastUpdate = recoveryPosition;
-                process(message, recoveryPosition, lastIndoubtPosition);
-                redoCounter++;
-                recoveryPosition = journal.getNextLocation(recoveryPosition);
-            }
-            long end = System.currentTimeMillis();
-            LOG.info("Recovery replayed " + redoCounter + " operations from the journal in " + ((end - start) / 1000.0f) + " seconds.");
-        }
-
-        // We may have to undo some index updates.
-        pageFile.tx().execute(new Transaction.Closure<IOException>() {
-            public void execute(Transaction tx) throws IOException {
-                recoverIndex(tx, journal);
-            }
-        });
-
-        // rollback any recovered inflight local transactions
-        Set<TransactionId> toRollback = new HashSet<TransactionId>();
-        synchronized (inflightTransactions) {
-            for (Iterator<TransactionId> it = inflightTransactions.keySet().iterator(); it.hasNext(); ) {
-                TransactionId id = it.next();
-                if (id.isLocalTransaction()) {
-                    toRollback.add(id);
-                }
-            }
-            for (TransactionId tx : toRollback) {
-                LOG.debug("rolling back recovered indoubt local transaction " + tx);
-                store(journal, new KahaRollbackCommand().setTransactionInfo(createTransactionInfo(tx)), false, null, null);
-            }
-        }
+    @SuppressWarnings("unused")
+    private KahaTransactionInfo createLocalTransactionInfo(TransactionId tx) {
+        return TransactionIdConversion.convertToLocal(tx);
     }
 
     private Location minimum(Location producerAuditPosition,
-                             Location lastIndoubtPosition) {
+            Location lastIndoubtPosition) {
         Location min = null;
         if (producerAuditPosition != null) {
             min = producerAuditPosition;
@@ -503,9 +529,9 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         return min;
     }
 
-    private Location recoverProducerAudit(Journal journal) throws IOException {
+    private Location recoverProducerAudit() throws IOException {
         if (metadata.producerSequenceIdTrackerLocation != null) {
-            KahaProducerAuditCommand audit = (KahaProducerAuditCommand) load(journal, metadata.producerSequenceIdTrackerLocation);
+            KahaProducerAuditCommand audit = (KahaProducerAuditCommand) load(metadata.producerSequenceIdTrackerLocation);
             try {
                 ObjectInputStream objectIn = new ObjectInputStream(audit.getAudit().newInput());
                 metadata.producerSequenceIdTracker = (ActiveMQMessageAuditNoSync) objectIn.readObject();
@@ -520,12 +546,12 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         }
     }
 
-    protected void recoverIndex(Transaction tx, Journal journal) throws IOException {
+    protected void recoverIndex(Transaction tx) throws IOException {
         long start = System.currentTimeMillis();
         // It is possible index updates got applied before the journal updates..
         // in that case we need to removed references to messages that are not in the journal
         final Location lastAppendLocation = journal.getLastAppendLocation();
-        long undoCounter = 0;
+        long undoCounter=0;
 
         // Go through all the destinations to see if they have messages past the lastAppendLocation
         for (StoredDestination sd : storedDestinations.values()) {
@@ -539,7 +565,6 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                 }
             });
 
-
             for (Long sequenceId : matches) {
                 MessageKeys keys = sd.orderIndex.remove(tx, sequenceId);
                 sd.locationIndex.remove(tx, keys.location);
@@ -550,11 +575,13 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
             }
         }
 
-        long end = System.currentTimeMillis();
-        if (undoCounter > 0) {
-            // The rolledback operations are basically in flight journal writes.  To avoid getting these the end user
-            // should do sync writes to the journal.
-            LOG.info("Rolled back " + undoCounter + " messages from the index in " + ((end - start) / 1000.0f) + " seconds.");
+        if( undoCounter > 0 ) {
+            // The rolledback operations are basically in flight journal writes.  To avoid getting
+            // these the end user should do sync writes to the journal.
+            if (LOG.isInfoEnabled()) {
+                long end = System.currentTimeMillis();
+                LOG.info("Rolled back " + undoCounter + " messages from the index in " + ((end - start) / 1000.0f) + " seconds.");
+            }
         }
 
         undoCounter = 0;
@@ -567,12 +594,12 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         for (StoredDestination sd : storedDestinations.values()) {
             // Use a visitor to cut down the number of pages that we load
             sd.locationIndex.visit(tx, new BTreeVisitor<Location, Long>() {
-                int last = -1;
+                int last=-1;
 
                 public boolean isInterestedInKeysBetween(Location first, Location second) {
-                    if (first == null) {
+                    if( first==null ) {
                         return !ss.contains(0, second.getDataFileId());
-                    } else if (second == null) {
+                    } else if( second==null ) {
                         return true;
                     } else {
                         return !ss.contains(first.getDataFileId(), second.getDataFileId());
@@ -582,7 +609,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                 public void visit(List<Location> keys, List<Long> values) {
                     for (Location l : keys) {
                         int fileId = l.getDataFileId();
-                        if (last != fileId) {
+                        if( last != fileId ) {
                             ss.add(fileId);
                             last = fileId;
                         }
@@ -598,7 +625,9 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         missingJournalFiles.removeAll(journal.getFileMap().keySet());
 
         if (!missingJournalFiles.isEmpty()) {
-            LOG.info("Some journal files are missing: " + missingJournalFiles);
+            if (LOG.isInfoEnabled()) {
+                LOG.info("Some journal files are missing: " + missingJournalFiles);
+            }
         }
 
         ArrayList<BTreeVisitor.Predicate<Location>> missingPredicates = new ArrayList<BTreeVisitor.Predicate<Location>>();
@@ -635,7 +664,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
 
                     // We either 'gracefully' recover dropping the missing messages or
                     // we error out.
-                    if (ignoreMissingJournalfiles) {
+                    if( ignoreMissingJournalfiles ) {
                         // Update the index to remove the references to the missing data
                         for (Long sequenceId : matches) {
                             MessageKeys keys = sd.orderIndex.remove(tx, sequenceId);
@@ -646,29 +675,31 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                         }
 
                     } else {
-                        throw new IOException("Detected missing/corrupt journal files. " + matches.size() + " messages affected.");
+                        throw new IOException("Detected missing/corrupt journal files. "+matches.size()+" messages affected.");
                     }
                 }
             }
         }
 
-        end = System.currentTimeMillis();
-        if (undoCounter > 0) {
+        if( undoCounter > 0 ) {
             // The rolledback operations are basically in flight journal writes.  To avoid getting these the end user
             // should do sync writes to the journal.
-            LOG.info("Detected missing/corrupt journal files.  Dropped " + undoCounter + " messages from the index in " + ((end - start) / 1000.0f) + " seconds.");
+            if (LOG.isInfoEnabled()) {
+                long end = System.currentTimeMillis();
+                LOG.info("Detected missing/corrupt journal files.  Dropped " + undoCounter + " messages from the index in " + ((end - start) / 1000.0f) + " seconds.");
+            }
         }
     }
 
     private Location nextRecoveryPosition;
     private Location lastRecoveryPosition;
 
-    public void incrementalRecover(Journal journal) throws IOException {
+    public void incrementalRecover() throws IOException {
         this.indexLock.writeLock().lock();
         try {
-            if (nextRecoveryPosition == null) {
-                if (lastRecoveryPosition == null) {
-                    nextRecoveryPosition = getRecoveryPosition(journal);
+            if( nextRecoveryPosition == null ) {
+                if( lastRecoveryPosition==null ) {
+                    nextRecoveryPosition = getRecoveryPosition();
                 } else {
                     nextRecoveryPosition = journal.getNextLocation(lastRecoveryPosition);
                 }
@@ -676,7 +707,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
             while (nextRecoveryPosition != null) {
                 lastRecoveryPosition = nextRecoveryPosition;
                 metadata.lastUpdate = lastRecoveryPosition;
-                JournalCommand<?> message = load(journal, lastRecoveryPosition);
+                JournalCommand<?> message = load(lastRecoveryPosition);
                 process(message, lastRecoveryPosition, (Runnable)null);
                 nextRecoveryPosition = journal.getNextLocation(lastRecoveryPosition);
             }
@@ -689,7 +720,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         return metadata.lastUpdate;
     }
 
-    private Location getRecoveryPosition(Journal journal) throws IOException {
+    private Location getRecoveryPosition() throws IOException {
 
         if (!this.forceRecoverIndex) {
 
@@ -699,7 +730,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
             }
 
             // Perhaps there were no transactions...
-            if (metadata.lastUpdate != null) {
+            if( metadata.lastUpdate!=null) {
                 // Start replay at the record after the last one recorded in the index file.
                 return journal.getNextLocation(metadata.lastUpdate);
             }
@@ -709,40 +740,36 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
     }
 
     protected void checkpointCleanup(final boolean cleanup) throws IOException {
-        for (Journal journal : getJournalManager().getJournals()) {
-            checkpointCleanup(journal, cleanup);
-        }
-    }
-
-    protected void checkpointCleanup(final Journal journal, final boolean cleanup) throws IOException {
         long start;
         this.indexLock.writeLock().lock();
         try {
             start = System.currentTimeMillis();
-            if (!opened.get()) {
+            if( !opened.get() ) {
                 return;
             }
             pageFile.tx().execute(new Transaction.Closure<IOException>() {
                 public void execute(Transaction tx) throws IOException {
-                    checkpointUpdate(tx, journal, cleanup);
+                    checkpointUpdate(tx, cleanup);
                 }
             });
         } finally {
             this.indexLock.writeLock().unlock();
         }
+
         long end = System.currentTimeMillis();
         if (LOG_SLOW_ACCESS_TIME > 0 && end - start > LOG_SLOW_ACCESS_TIME) {
-            LOG.info("Slow KahaDB access: cleanup took " + (end - start));
+            if (LOG.isInfoEnabled()) {
+                LOG.info("Slow KahaDB access: cleanup took " + (end - start));
+            }
         }
     }
 
-
-    public void checkpoint(final Journal journal, Callback closure) throws Exception {
+    public void checkpoint(Callback closure) throws Exception {
         this.indexLock.writeLock().lock();
         try {
             pageFile.tx().execute(new Transaction.Closure<IOException>() {
                 public void execute(Transaction tx) throws IOException {
-                    checkpointUpdate(tx, journal, false);
+                    checkpointUpdate(tx, false);
                 }
             });
             closure.execute();
@@ -754,10 +781,17 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
     // /////////////////////////////////////////////////////////////////
     // Methods call by the broker to update and query the store.
     // /////////////////////////////////////////////////////////////////
-    public Location store(Journal journal, JournalCommand<?> data) throws IOException {
-        return store(journal, data, false, null, null);
+    public Location store(JournalCommand<?> data) throws IOException {
+        return store(data, false, null,null);
     }
 
+    public ByteSequence toByteSequence(JournalCommand<?> data) throws IOException {
+        int size = data.serializedSizeFramed();
+        DataByteArrayOutputStream os = new DataByteArrayOutputStream(size + 1);
+        os.writeByte(data.type().getNumber());
+        data.writeFramed(os);
+        return os.toByteSequence();
+    }
 
     /**
      * All updated are are funneled through this method. The updates are converted
@@ -765,23 +799,21 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
      * the JournalMessage is used to update the index just like it would be done
      * during a recovery process.
      */
-    public Location store(final Journal journal, JournalCommand<?> data, boolean sync, Runnable before, Runnable after) throws IOException {
+    public Location store(JournalCommand<?> data, boolean sync, Runnable before,Runnable after) throws IOException {
         if (before != null) {
             before.run();
         }
         try {
-            int size = data.serializedSizeFramed();
-            DataByteArrayOutputStream os = new DataByteArrayOutputStream(size + 1);
-            os.writeByte(data.type().getNumber());
-            data.writeFramed(os);
-
+            ByteSequence sequence = toByteSequence(data);
             long start = System.currentTimeMillis();
-            Location location = journal.write(os.toByteSequence(), sync);
+            Location location = journal.write(sequence, sync);
             long start2 = System.currentTimeMillis();
             process(data, location, after);
             long end = System.currentTimeMillis();
-            if (LOG_SLOW_ACCESS_TIME > 0 && end - start > LOG_SLOW_ACCESS_TIME) {
-                LOG.info("Slow KahaDB access: Journal append took: " + (start2 - start) + " ms, Index update took " + (end - start2) + " ms");
+            if( LOG_SLOW_ACCESS_TIME>0 && end-start > LOG_SLOW_ACCESS_TIME) {
+                if (LOG.isInfoEnabled()) {
+                    LOG.info("Slow KahaDB access: Journal append took: "+(start2-start)+" ms, Index update took "+(end-start2)+" ms");
+                }
             }
 
             if (after != null) {
@@ -799,7 +831,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                 }
             }
 
-            if (!checkpointThread.isAlive()) {
+            if (checkpointThread != null && !checkpointThread.isAlive()) {
                 startCheckpoint();
             }
             return location;
@@ -812,27 +844,37 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
 
     /**
      * Loads a previously stored JournalMessage
+     *
+     * @param location
+     * @return
+     * @throws IOException
      */
-    public JournalCommand<?> load(Journal journal, Location location) throws IOException {
+    public JournalCommand<?> load(Location location) throws IOException {
         long start = System.currentTimeMillis();
         ByteSequence data = journal.read(location);
         long end = System.currentTimeMillis();
-        if (LOG_SLOW_ACCESS_TIME > 0 && end - start > LOG_SLOW_ACCESS_TIME) {
-            LOG.info("Slow KahaDB access: Journal read took: " + (end - start) + " ms");
+        if( LOG_SLOW_ACCESS_TIME>0 && end-start > LOG_SLOW_ACCESS_TIME) {
+            if (LOG.isInfoEnabled()) {
+                LOG.info("Slow KahaDB access: Journal read took: "+(end-start)+" ms");
+            }
         }
         DataByteArrayInputStream is = new DataByteArrayInputStream(data);
         byte readByte = is.readByte();
         KahaEntryType type = KahaEntryType.valueOf(readByte);
-        if (type == null) {
-            throw new IOException("Could not load journal record. Invalid location: " + location);
+        if( type == null ) {
+            throw new IOException("Could not load journal record. Invalid location: "+location);
         }
-        JournalCommand<?> message = (JournalCommand<?>) type.createMessage();
+        JournalCommand<?> message = (JournalCommand<?>)type.createMessage();
         message.mergeFramed(is);
         return message;
     }
 
     /**
      * do minimal recovery till we reach the last inDoubtLocation
+     * @param data
+     * @param location
+     * @param inDoubtlocation
+     * @throws IOException
      */
     void process(JournalCommand<?> data, final Location location, final Location inDoubtlocation) throws IOException {
         if (inDoubtlocation != null && location.compareTo(inDoubtlocation) >= 0) {
@@ -902,6 +944,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         });
     }
 
+    @SuppressWarnings("rawtypes")
     protected void process(final KahaAddMessageCommand command, final Location location) throws IOException {
         if (command.hasTransactionInfo()) {
             List<Operation> inflightTx = getInflightTx(command.getTransactionInfo(), location);
@@ -920,10 +963,11 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         }
     }
 
+    @SuppressWarnings("rawtypes")
     protected void process(final KahaRemoveMessageCommand command, final Location location) throws IOException {
         if (command.hasTransactionInfo()) {
-            List<Operation> inflightTx = getInflightTx(command.getTransactionInfo(), location);
-            inflightTx.add(new RemoveOpperation(command, location));
+           List<Operation> inflightTx = getInflightTx(command.getTransactionInfo(), location);
+           inflightTx.add(new RemoveOpperation(command, location));
         } else {
             this.indexLock.writeLock().lock();
             try {
@@ -936,7 +980,6 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                 this.indexLock.writeLock().unlock();
             }
         }
-
     }
 
     protected void process(final KahaRemoveDestinationCommand command, final Location location) throws IOException {
@@ -983,8 +1026,9 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         }
     }
 
+    @SuppressWarnings("rawtypes")
     protected void process(KahaCommitCommand command, Location location, final Runnable after) throws IOException {
-        TransactionId key = key(command.getTransactionInfo());
+        TransactionId key = TransactionIdConversion.convert(command.getTransactionInfo());
         List<Operation> inflightTx;
         synchronized (inflightTransactions) {
             inflightTx = inflightTransactions.remove(key);
@@ -993,6 +1037,10 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
             }
         }
         if (inflightTx == null) {
+            if (after != null) {
+                // since we don't push this after and we may find another, lets run it now
+                after.run();
+            }
             return;
         }
 
@@ -1013,8 +1061,9 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         }
     }
 
+    @SuppressWarnings("rawtypes")
     protected void process(KahaPrepareCommand command, Location location) {
-        TransactionId key = key(command.getTransactionInfo());
+        TransactionId key = TransactionIdConversion.convert(command.getTransactionInfo());
         synchronized (inflightTransactions) {
             List<Operation> tx = inflightTransactions.remove(key);
             if (tx != null) {
@@ -1023,15 +1072,36 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         }
     }
 
-    protected void process(KahaRollbackCommand command, Location location) {
-        TransactionId key = key(command.getTransactionInfo());
+    @SuppressWarnings("rawtypes")
+    protected void process(KahaRollbackCommand command, Location location)  throws IOException {
+        TransactionId key = TransactionIdConversion.convert(command.getTransactionInfo());
+        List<Operation> updates = null;
         synchronized (inflightTransactions) {
-            List<Operation> tx = inflightTransactions.remove(key);
-            if (tx == null) {
-                preparedTransactions.remove(key);
+            updates = inflightTransactions.remove(key);
+            if (updates == null) {
+                updates = preparedTransactions.remove(key);
+            }
+        }
+        if (isRewriteOnRedelivery()) {
+            persistRedeliveryCount(updates);
+        }
+    }
+
+    @SuppressWarnings("rawtypes")
+    private void persistRedeliveryCount(List<Operation> updates)  throws IOException {
+        if (updates != null) {
+            for (Operation operation : updates) {
+                operation.getCommand().visit(new Visitor() {
+                    @Override
+                    public void visit(KahaRemoveMessageCommand command) throws IOException {
+                        incrementRedeliveryAndReWrite(command.getMessageId(), command.getDestination());
+                    }
+                });
             }
         }
     }
+
+   abstract void incrementRedeliveryAndReWrite(String key, KahaDestination destination) throws IOException;
 
     // /////////////////////////////////////////////////////////////////
     // These methods do the actual index updates.
@@ -1065,7 +1135,6 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                 // store a DUP
                 // message. Bad BOY! Don't do it, and log a warning.
                 LOG.warn("Duplicate message add attempt rejected. Destination: " + command.getDestination().getName() + ", Message id: " + command.getMessageId());
-                // TODO: consider just rolling back the tx.
                 sd.messageIdIndex.put(tx, command.getMessageId(), previous);
                 sd.locationIndex.remove(tx, location);
             }
@@ -1076,7 +1145,6 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
             // indexes would
             // be wrong..
             //
-            // TODO: consider just rolling back the tx.
             sd.locationIndex.put(tx, location, previous);
         }
         // record this id in any event, initial send or recovery
@@ -1095,7 +1163,11 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                 if (keys != null) {
                     sd.locationIndex.remove(tx, keys.location);
                     recordAckMessageReferenceLocation(ackLocation, keys.location);
+                }  else if (LOG.isDebugEnabled()) {
+                    LOG.debug("message not found in order index: " + sequenceId  + " for: " + command.getMessageId());
                 }
+            } else if (LOG.isDebugEnabled()) {
+                LOG.debug("message not found in sequence id index: " + command.getMessageId());
             }
         } else {
             // In the topic case we need remove the message once it's been acked
@@ -1112,6 +1184,8 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                 }
                 // The following method handles deleting un-referenced messages.
                 removeAckLocation(tx, sd, subscriptionKey, sequence);
+            } else if (LOG.isDebugEnabled()) {
+                LOG.debug("no message sequence exists for id: " + command.getMessageId() + " and sub: " + command.getSubscriptionKey());
             }
 
         }
@@ -1119,7 +1193,6 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
     }
 
     Map<Integer, Set<Integer>> ackMessageFileMap = new HashMap<Integer, Set<Integer>>();
-
     private void recordAckMessageReferenceLocation(Location ackLocation, Location messageLocation) {
         Set<Integer> referenceFileIds = ackMessageFileMap.get(Integer.valueOf(ackLocation.getDataFileId()));
         if (referenceFileIds == null) {
@@ -1157,7 +1230,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
 
             sd.ackPositions.clear(tx);
             sd.ackPositions.unload(tx);
-            tx.free(sd.ackPositions.getPageId());
+            tx.free(sd.ackPositions.getHeadPageId());
         }
 
         String key = key(command.getDestination());
@@ -1172,17 +1245,19 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         // If set then we are creating it.. otherwise we are destroying the sub
         if (command.hasSubscriptionInfo()) {
             sd.subscriptions.put(tx, subscriptionKey, command);
-            long ackLocation = NOT_ACKED;
+            long ackLocation=NOT_ACKED;
             if (!command.getRetroactive()) {
-                ackLocation = sd.orderIndex.nextMessageId - 1;
+                ackLocation = sd.orderIndex.nextMessageId-1;
             } else {
                 addAckLocationForRetroactiveSub(tx, sd, ackLocation, subscriptionKey);
             }
             sd.subscriptionAcks.put(tx, subscriptionKey, new LastAck(ackLocation));
+            sd.subscriptionCache.add(subscriptionKey);
         } else {
             // delete the sub...
             sd.subscriptions.remove(tx, subscriptionKey);
             sd.subscriptionAcks.remove(tx, subscriptionKey);
+            sd.subscriptionCache.remove(subscriptionKey);
             removeAckLocationsForSub(tx, sd, subscriptionKey);
         }
     }
@@ -1191,27 +1266,29 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
      * @param tx
      * @throws IOException
      */
-    void checkpointUpdate(Transaction tx, Journal journal, boolean cleanup) throws IOException {
+    void checkpointUpdate(Transaction tx, boolean cleanup) throws IOException {
         LOG.debug("Checkpoint started.");
 
         // reflect last update exclusive of current checkpoint
         Location firstTxLocation = metadata.lastUpdate;
 
         metadata.state = OPEN_STATE;
-        metadata.producerSequenceIdTrackerLocation = checkpointProducerAudit(journal);
+        metadata.producerSequenceIdTrackerLocation = checkpointProducerAudit();
         metadata.firstInProgressTransactionLocation = getFirstInProgressTxLocation();
         tx.store(metadata.page, metadataMarshaller, true);
         pageFile.flush();
 
-        if (cleanup) {
+        if( cleanup ) {
 
             final TreeSet<Integer> completeFileSet = new TreeSet<Integer>(journal.getFileMap().keySet());
             final TreeSet<Integer> gcCandidateSet = new TreeSet<Integer>(completeFileSet);
 
-            LOG.trace("Last update: " + firstTxLocation + ", full gc candidates set: " + gcCandidateSet);
+            if (LOG.isTraceEnabled()) {
+                LOG.trace("Last update: " + firstTxLocation + ", full gc candidates set: " + gcCandidateSet);
+            }
 
             // Don't GC files under replication
-            if (journalFilesBeingReplicated != null) {
+            if( journalFilesBeingReplicated!=null ) {
                 gcCandidateSet.removeAll(journalFilesBeingReplicated);
             }
 
@@ -1220,53 +1297,54 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
             }
 
             // Don't GC files after the first in progress tx
-            if (metadata.firstInProgressTransactionLocation != null) {
+            if( metadata.firstInProgressTransactionLocation!=null ) {
                 if (metadata.firstInProgressTransactionLocation.getDataFileId() < firstTxLocation.getDataFileId()) {
                     firstTxLocation = metadata.firstInProgressTransactionLocation;
                 }
             }
 
-            if (firstTxLocation != null) {
-                while (!gcCandidateSet.isEmpty()) {
+            if( firstTxLocation!=null ) {
+                while( !gcCandidateSet.isEmpty() ) {
                     Integer last = gcCandidateSet.last();
-                    if (last >= firstTxLocation.getDataFileId()) {
+                    if( last >= firstTxLocation.getDataFileId() ) {
                         gcCandidateSet.remove(last);
                     } else {
                         break;
                     }
                 }
-                LOG.trace("gc candidates after first tx:" + firstTxLocation + ", " + gcCandidateSet);
+                if (LOG.isTraceEnabled()) {
+                    LOG.trace("gc candidates after first tx:" + firstTxLocation + ", " + gcCandidateSet);
+                }
             }
 
             // Go through all the destinations to see if any of them can remove GC candidates.
             for (Entry<String, StoredDestination> entry : storedDestinations.entrySet()) {
-                if (gcCandidateSet.isEmpty()) {
+                if( gcCandidateSet.isEmpty() ) {
                     break;
                 }
 
                 // Use a visitor to cut down the number of pages that we load
                 entry.getValue().locationIndex.visit(tx, new BTreeVisitor<Location, Long>() {
-                    int last = -1;
-
+                    int last=-1;
                     public boolean isInterestedInKeysBetween(Location first, Location second) {
-                        if (first == null) {
-                            SortedSet<Integer> subset = gcCandidateSet.headSet(second.getDataFileId() + 1);
-                            if (!subset.isEmpty() && subset.last() == second.getDataFileId()) {
+                        if( first==null ) {
+                            SortedSet<Integer> subset = gcCandidateSet.headSet(second.getDataFileId()+1);
+                            if( !subset.isEmpty() && subset.last() == second.getDataFileId() ) {
                                 subset.remove(second.getDataFileId());
                             }
                             return !subset.isEmpty();
-                        } else if (second == null) {
+                        } else if( second==null ) {
                             SortedSet<Integer> subset = gcCandidateSet.tailSet(first.getDataFileId());
-                            if (!subset.isEmpty() && subset.first() == first.getDataFileId()) {
+                            if( !subset.isEmpty() && subset.first() == first.getDataFileId() ) {
                                 subset.remove(first.getDataFileId());
                             }
                             return !subset.isEmpty();
                         } else {
-                            SortedSet<Integer> subset = gcCandidateSet.subSet(first.getDataFileId(), second.getDataFileId() + 1);
-                            if (!subset.isEmpty() && subset.first() == first.getDataFileId()) {
+                            SortedSet<Integer> subset = gcCandidateSet.subSet(first.getDataFileId(), second.getDataFileId()+1);
+                            if( !subset.isEmpty() && subset.first() == first.getDataFileId() ) {
                                 subset.remove(first.getDataFileId());
                             }
-                            if (!subset.isEmpty() && subset.last() == second.getDataFileId()) {
+                            if( !subset.isEmpty() && subset.last() == second.getDataFileId() ) {
                                 subset.remove(second.getDataFileId());
                             }
                             return !subset.isEmpty();
@@ -1276,18 +1354,22 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                     public void visit(List<Location> keys, List<Long> values) {
                         for (Location l : keys) {
                             int fileId = l.getDataFileId();
-                            if (last != fileId) {
+                            if( last != fileId ) {
                                 gcCandidateSet.remove(fileId);
                                 last = fileId;
                             }
                         }
                     }
                 });
-                LOG.trace("gc candidates after dest:" + entry.getKey() + ", " + gcCandidateSet);
+                if (LOG.isTraceEnabled()) {
+                    LOG.trace("gc candidates after dest:" + entry.getKey() + ", " + gcCandidateSet);
+                }
             }
 
             // check we are not deleting file with ack for in-use journal files
-            LOG.trace("gc candidates: " + gcCandidateSet);
+            if (LOG.isTraceEnabled()) {
+                LOG.trace("gc candidates: " + gcCandidateSet);
+            }
             final TreeSet<Integer> gcCandidates = new TreeSet<Integer>(gcCandidateSet);
             Iterator<Integer> candidates = gcCandidateSet.iterator();
             while (candidates.hasNext()) {
@@ -1304,14 +1386,18 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                     if (gcCandidateSet.contains(candidate)) {
                         ackMessageFileMap.remove(candidate);
                     } else {
-                        LOG.trace("not removing data file: " + candidate
-                                + " as contained ack(s) refer to referenced file: " + referencedFileIds);
+                        if (LOG.isTraceEnabled()) {
+                            LOG.trace("not removing data file: " + candidate
+                                    + " as contained ack(s) refer to referenced file: " + referencedFileIds);
+                        }
                     }
                 }
             }
 
             if (!gcCandidateSet.isEmpty()) {
-                LOG.debug("Cleanup removing the data files: " + gcCandidateSet);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Cleanup removing the data files: " + gcCandidateSet);
+                }
                 journal.removeDataFiles(gcCandidateSet);
             }
         }
@@ -1319,13 +1405,13 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         LOG.debug("Checkpoint done.");
     }
 
-    private Location checkpointProducerAudit(Journal journal) throws IOException {
+    private Location checkpointProducerAudit() throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         ObjectOutputStream oout = new ObjectOutputStream(baos);
         oout.writeObject(metadata.producerSequenceIdTracker);
         oout.flush();
         oout.close();
-        return store(journal, new KahaProducerAuditCommand().setAudit(new Buffer(baos.toByteArray())), true, null, null);
+        return store(new KahaProducerAuditCommand().setAudit(new Buffer(baos.toByteArray())), true, null, null);
     }
 
     public HashSet<Integer> getJournalFilesBeingReplicated() {
@@ -1335,7 +1421,6 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
     // /////////////////////////////////////////////////////////////////
     // StoredDestination related implementation methods.
     // /////////////////////////////////////////////////////////////////
-
 
     private final HashMap<String, StoredDestination> storedDestinations = new HashMap<String, StoredDestination>();
 
@@ -1351,13 +1436,13 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         final Location location;
 
         public MessageKeys(String messageId, Location location) {
-            this.messageId = messageId;
-            this.location = location;
+            this.messageId=messageId;
+            this.location=location;
         }
 
         @Override
         public String toString() {
-            return "[" + messageId + "," + location + "]";
+            return "["+messageId+","+location+"]";
         }
     }
 
@@ -1441,7 +1526,11 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         BTreeIndex<String, KahaSubscriptionCommand> subscriptions;
         BTreeIndex<String, LastAck> subscriptionAcks;
         HashMap<String, MessageOrderCursor> subscriptionCursors;
-        BTreeIndex<Long, HashSet<String>> ackPositions;
+        ListIndex<String, SequenceSet> ackPositions;
+
+        // Transient data used to track which Messages are no longer needed.
+        final TreeMap<Long, Long> messageReferences = new TreeMap<Long, Long>();
+        final HashSet<String> subscriptionCache = new LinkedHashSet<String>();
     }
 
     protected class StoredDestinationMarshaller extends VariableMarshaller<StoredDestination> {
@@ -1455,16 +1544,44 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
             if (dataIn.readBoolean()) {
                 value.subscriptions = new BTreeIndex<String, KahaSubscriptionCommand>(pageFile, dataIn.readLong());
                 value.subscriptionAcks = new BTreeIndex<String, LastAck>(pageFile, dataIn.readLong());
-                if (metadata.version >= 3) {
-                    value.ackPositions = new BTreeIndex<Long, HashSet<String>>(pageFile, dataIn.readLong());
+                if (metadata.version >= VERSION) {
+                    value.ackPositions = new ListIndex<String, SequenceSet>(pageFile, dataIn.readLong());
                 } else {
                     // upgrade
                     pageFile.tx().execute(new Transaction.Closure<IOException>() {
                         public void execute(Transaction tx) throws IOException {
-                            value.ackPositions = new BTreeIndex<Long, HashSet<String>>(pageFile, tx.allocate());
-                            value.ackPositions.setKeyMarshaller(LongMarshaller.INSTANCE);
-                            value.ackPositions.setValueMarshaller(HashSetStringMarshaller.INSTANCE);
-                            value.ackPositions.load(tx);
+                            BTreeIndex<Long, HashSet<String>> oldAckPositions =
+                                new BTreeIndex<Long, HashSet<String>>(pageFile, tx.allocate());
+                            oldAckPositions.setKeyMarshaller(LongMarshaller.INSTANCE);
+                            oldAckPositions.setValueMarshaller(HashSetStringMarshaller.INSTANCE);
+                            oldAckPositions.load(tx);
+
+                            LinkedHashMap<String, SequenceSet> temp = new LinkedHashMap<String, SequenceSet>();
+
+                            // Do the initial build of the data in memory before writing into the store
+                            // based Ack Positions List to avoid a lot of disk thrashing.
+                            Iterator<Entry<Long, HashSet<String>>> iterator = oldAckPositions.iterator(tx);
+                            while (iterator.hasNext()) {
+                                Entry<Long, HashSet<String>> entry = iterator.next();
+
+                                for(String subKey : entry.getValue()) {
+                                    SequenceSet pendingAcks = temp.get(subKey);
+                                    if (pendingAcks == null) {
+                                        pendingAcks = new SequenceSet();
+                                        temp.put(subKey, pendingAcks);
+                                    }
+
+                                    pendingAcks.add(entry.getKey());
+                                }
+                            }
+
+                            // Now move the pending messages to ack data into the store backed
+                            // structure.
+                            value.ackPositions = new ListIndex<String, SequenceSet>(pageFile, tx.allocate());
+                            for(String subscriptionKey : temp.keySet()) {
+                                value.ackPositions.put(tx, subscriptionKey, temp.get(subscriptionKey));
+                            }
+
                         }
                     });
                 }
@@ -1473,20 +1590,20 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                 value.orderIndex.lowPriorityIndex = new BTreeIndex<Long, MessageKeys>(pageFile, dataIn.readLong());
                 value.orderIndex.highPriorityIndex = new BTreeIndex<Long, MessageKeys>(pageFile, dataIn.readLong());
             } else {
-                // upgrade
-                pageFile.tx().execute(new Transaction.Closure<IOException>() {
-                    public void execute(Transaction tx) throws IOException {
-                        value.orderIndex.lowPriorityIndex = new BTreeIndex<Long, MessageKeys>(pageFile, tx.allocate());
-                        value.orderIndex.lowPriorityIndex.setKeyMarshaller(LongMarshaller.INSTANCE);
-                        value.orderIndex.lowPriorityIndex.setValueMarshaller(MessageKeysMarshaller.INSTANCE);
-                        value.orderIndex.lowPriorityIndex.load(tx);
+                    // upgrade
+                    pageFile.tx().execute(new Transaction.Closure<IOException>() {
+                        public void execute(Transaction tx) throws IOException {
+                            value.orderIndex.lowPriorityIndex = new BTreeIndex<Long, MessageKeys>(pageFile, tx.allocate());
+                            value.orderIndex.lowPriorityIndex.setKeyMarshaller(LongMarshaller.INSTANCE);
+                            value.orderIndex.lowPriorityIndex.setValueMarshaller(MessageKeysMarshaller.INSTANCE);
+                            value.orderIndex.lowPriorityIndex.load(tx);
 
-                        value.orderIndex.highPriorityIndex = new BTreeIndex<Long, MessageKeys>(pageFile, tx.allocate());
-                        value.orderIndex.highPriorityIndex.setKeyMarshaller(LongMarshaller.INSTANCE);
-                        value.orderIndex.highPriorityIndex.setValueMarshaller(MessageKeysMarshaller.INSTANCE);
-                        value.orderIndex.highPriorityIndex.load(tx);
-                    }
-                });
+                            value.orderIndex.highPriorityIndex = new BTreeIndex<Long, MessageKeys>(pageFile, tx.allocate());
+                            value.orderIndex.highPriorityIndex.setKeyMarshaller(LongMarshaller.INSTANCE);
+                            value.orderIndex.highPriorityIndex.setValueMarshaller(MessageKeysMarshaller.INSTANCE);
+                            value.orderIndex.highPriorityIndex.load(tx);
+                        }
+                    });
             }
 
             return value;
@@ -1500,7 +1617,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                 dataOut.writeBoolean(true);
                 dataOut.writeLong(value.subscriptions.getPageId());
                 dataOut.writeLong(value.subscriptionAcks.getPageId());
-                dataOut.writeLong(value.ackPositions.getPageId());
+                dataOut.writeLong(value.ackPositions.getHeadPageId());
             } else {
                 dataOut.writeBoolean(false);
             }
@@ -1514,12 +1631,12 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
 
         public KahaSubscriptionCommand readPayload(DataInput dataIn) throws IOException {
             KahaSubscriptionCommand rc = new KahaSubscriptionCommand();
-            rc.mergeFramed((InputStream) dataIn);
+            rc.mergeFramed((InputStream)dataIn);
             return rc;
         }
 
         public void writePayload(KahaSubscriptionCommand object, DataOutput dataOut) throws IOException {
-            object.writeFramed((OutputStream) dataOut);
+            object.writeFramed((OutputStream)dataOut);
         }
     }
 
@@ -1536,7 +1653,6 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         }
         return rc;
     }
-
 
     protected StoredDestination getExistingStoredDestination(KahaDestination destination, Transaction tx) throws IOException {
         String key = key(destination);
@@ -1567,7 +1683,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
             if (topic) {
                 rc.subscriptions = new BTreeIndex<String, KahaSubscriptionCommand>(pageFile, tx.allocate());
                 rc.subscriptionAcks = new BTreeIndex<String, LastAck>(pageFile, tx.allocate());
-                rc.ackPositions = new BTreeIndex<Long, HashSet<String>>(pageFile, tx.allocate());
+                rc.ackPositions = new ListIndex<String, SequenceSet>(pageFile, tx.allocate());
             }
             metadata.destinations.put(tx, key, rc);
         }
@@ -1597,8 +1713,8 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
             rc.subscriptionAcks.setValueMarshaller(new LastAckMarshaller());
             rc.subscriptionAcks.load(tx);
 
-            rc.ackPositions.setKeyMarshaller(LongMarshaller.INSTANCE);
-            rc.ackPositions.setValueMarshaller(HashSetStringMarshaller.INSTANCE);
+            rc.ackPositions.setKeyMarshaller(StringMarshaller.INSTANCE);
+            rc.ackPositions.setValueMarshaller(SequenceSet.Marshaller.INSTANCE);
             rc.ackPositions.load(tx);
 
             rc.subscriptionCursors = new HashMap<String, MessageOrderCursor>();
@@ -1609,7 +1725,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                 for (Iterator<Entry<String, LastAck>> iterator = rc.subscriptionAcks.iterator(tx); iterator.hasNext(); ) {
                     Entry<String, LastAck> entry = iterator.next();
                     for (Iterator<Entry<Long, MessageKeys>> orderIterator =
-                                 rc.orderIndex.iterator(tx, new MessageOrderCursor(entry.getValue().lastAckedSequence)); orderIterator.hasNext(); ) {
+                            rc.orderIndex.iterator(tx, new MessageOrderCursor(entry.getValue().lastAckedSequence)); orderIterator.hasNext(); ) {
                         Long sequence = orderIterator.next().getKey();
                         addAckLocation(tx, rc, sequence, entry.getKey());
                     }
@@ -1618,27 +1734,47 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                 }
             }
 
+            // Configure the message references index
+            Iterator<Entry<String, SequenceSet>> subscriptions = rc.ackPositions.iterator(tx);
+            while (subscriptions.hasNext()) {
+                Entry<String, SequenceSet> subscription = subscriptions.next();
+                if (subscription.getValue() != null) {
+                    for(Long sequenceId : subscription.getValue()) {
+                        Long current = rc.messageReferences.get(sequenceId);
+                        if (current == null) {
+                            current = new Long(0);
+                        }
+                        rc.messageReferences.put(sequenceId, Long.valueOf(current.longValue() + 1));
+                    }
+                }
+            }
+
+            // Configure the subscription cache
+            for (Iterator<Entry<String, LastAck>> iterator = rc.subscriptionAcks.iterator(tx); iterator.hasNext(); ) {
+                Entry<String, LastAck> entry = iterator.next();
+                rc.subscriptionCache.add(entry.getKey());
+            }
+
             if (rc.orderIndex.nextMessageId == 0) {
                 // check for existing durable sub all acked out - pull next seq from acks as messages are gone
                 if (!rc.subscriptionAcks.isEmpty(tx)) {
-                    for (Iterator<Entry<String, LastAck>> iterator = rc.subscriptionAcks.iterator(tx); iterator.hasNext(); ) {
+                    for (Iterator<Entry<String, LastAck>> iterator = rc.subscriptionAcks.iterator(tx); iterator.hasNext();) {
                         Entry<String, LastAck> entry = iterator.next();
                         rc.orderIndex.nextMessageId =
-                                Math.max(rc.orderIndex.nextMessageId, entry.getValue().lastAckedSequence + 1);
+                                Math.max(rc.orderIndex.nextMessageId, entry.getValue().lastAckedSequence +1);
                     }
                 }
             } else {
                 // update based on ackPositions for unmatched, last entry is always the next
-                if (!rc.ackPositions.isEmpty(tx)) {
-                    Entry<Long, HashSet<String>> last = rc.ackPositions.getLast(tx);
+                if (!rc.messageReferences.isEmpty()) {
+                    Long nextMessageId = (Long) rc.messageReferences.keySet().toArray()[rc.messageReferences.size() - 1];
                     rc.orderIndex.nextMessageId =
-                            Math.max(rc.orderIndex.nextMessageId, last.getKey());
+                            Math.max(rc.orderIndex.nextMessageId, nextMessageId);
                 }
             }
-
         }
 
-        if (metadata.version < 3) {
+        if (metadata.version < VERSION) {
             // store again after upgrade
             metadata.destinations.put(tx, key, rc);
         }
@@ -1646,43 +1782,105 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
     }
 
     private void addAckLocation(Transaction tx, StoredDestination sd, Long messageSequence, String subscriptionKey) throws IOException {
-        HashSet<String> hs = sd.ackPositions.get(tx, messageSequence);
-        if (hs == null) {
-            hs = new HashSet<String>();
+        SequenceSet sequences = sd.ackPositions.get(tx, subscriptionKey);
+        if (sequences == null) {
+            sequences = new SequenceSet();
+            sequences.add(messageSequence);
+            sd.ackPositions.add(tx, subscriptionKey, sequences);
+        } else {
+            sequences.add(messageSequence);
+            sd.ackPositions.put(tx, subscriptionKey, sequences);
         }
-        hs.add(subscriptionKey);
-        // every ack location addition needs to be a btree modification to get it stored
-        sd.ackPositions.put(tx, messageSequence, hs);
+
+        Long count = sd.messageReferences.get(messageSequence);
+        if (count == null) {
+            count = Long.valueOf(0L);
+        }
+        count = count.longValue() + 1;
+        sd.messageReferences.put(messageSequence, count);
     }
 
     // new sub is interested in potentially all existing messages
     private void addAckLocationForRetroactiveSub(Transaction tx, StoredDestination sd, Long messageSequence, String subscriptionKey) throws IOException {
-        for (Iterator<Entry<Long, HashSet<String>>> iterator = sd.ackPositions.iterator(tx, messageSequence); iterator.hasNext(); ) {
-            Entry<Long, HashSet<String>> entry = iterator.next();
-            entry.getValue().add(subscriptionKey);
-            sd.ackPositions.put(tx, entry.getKey(), entry.getValue());
+        SequenceSet sequences = sd.ackPositions.get(tx, subscriptionKey);
+        if (sequences == null) {
+            sequences = new SequenceSet();
+            sequences.add(messageSequence);
+            sd.ackPositions.add(tx, subscriptionKey, sequences);
+        } else {
+            sequences.add(messageSequence);
+            sd.ackPositions.put(tx, subscriptionKey, sequences);
         }
-    }
 
-    final HashSet nextMessageIdMarker = new HashSet<String>();
+        Long count = sd.messageReferences.get(messageSequence);
+        if (count == null) {
+            count = Long.valueOf(0L);
+        }
+        count = count.longValue() + 1;
+        sd.messageReferences.put(messageSequence, count);
+    }
 
     // on a new message add, all existing subs are interested in this message
     private void addAckLocationForNewMessage(Transaction tx, StoredDestination sd, Long messageSequence) throws IOException {
-        HashSet hs = new HashSet<String>();
-        for (Iterator<Entry<String, LastAck>> iterator = sd.subscriptionAcks.iterator(tx); iterator.hasNext(); ) {
-            Entry<String, LastAck> entry = iterator.next();
-            hs.add(entry.getKey());
+        for(String subscriptionKey : sd.subscriptionCache) {
+            SequenceSet sequences = null;
+            sequences = sd.ackPositions.get(tx, subscriptionKey);
+            if (sequences == null) {
+                sequences = new SequenceSet();
+                sequences.add(new Sequence(messageSequence, messageSequence + 1));
+                sd.ackPositions.add(tx, subscriptionKey, sequences);
+            } else {
+                sequences.add(new Sequence(messageSequence, messageSequence + 1));
+                sd.ackPositions.put(tx, subscriptionKey, sequences);
+            }
+
+            Long count = sd.messageReferences.get(messageSequence);
+            if (count == null) {
+                count = Long.valueOf(0L);
+            }
+            count = count.longValue() + 1;
+            sd.messageReferences.put(messageSequence, count);
+            sd.messageReferences.put(messageSequence+1, Long.valueOf(0L));
         }
-        sd.ackPositions.put(tx, messageSequence, hs);
-        // add empty next to keep track of nextMessage
-        sd.ackPositions.put(tx, messageSequence + 1, nextMessageIdMarker);
     }
 
     private void removeAckLocationsForSub(Transaction tx, StoredDestination sd, String subscriptionKey) throws IOException {
         if (!sd.ackPositions.isEmpty(tx)) {
-            Long end = sd.ackPositions.getLast(tx).getKey();
-            for (Long sequence = sd.ackPositions.getFirst(tx).getKey(); sequence <= end; sequence++) {
-                removeAckLocation(tx, sd, subscriptionKey, sequence);
+            SequenceSet sequences = sd.ackPositions.remove(tx, subscriptionKey);
+            if (sequences == null || sequences.isEmpty()) {
+                return;
+            }
+
+            ArrayList<Long> unreferenced = new ArrayList<Long>();
+
+            for(Long sequenceId : sequences) {
+                long references = 0;
+                Long count = sd.messageReferences.get(sequenceId);
+                if (count != null) {
+                    references = count.longValue() - 1;
+                } else {
+                    continue;
+                }
+
+                if (references > 0) {
+                    sd.messageReferences.put(sequenceId, Long.valueOf(references));
+                } else {
+                    sd.messageReferences.remove(sequenceId);
+                    unreferenced.add(sequenceId);
+                }
+            }
+
+            for(Long sequenceId : unreferenced) {
+                // Find all the entries that need to get deleted.
+                ArrayList<Entry<Long, MessageKeys>> deletes = new ArrayList<Entry<Long, MessageKeys>>();
+                sd.orderIndex.getDeleteList(tx, deletes, sequenceId);
+
+                // Do the actual deletes.
+                for (Entry<Long, MessageKeys> entry : deletes) {
+                    sd.locationIndex.remove(tx, entry.getValue().location);
+                    sd.messageIdIndex.remove(tx, entry.getValue().messageId);
+                    sd.orderIndex.remove(tx, entry.getKey());
+                }
             }
         }
     }
@@ -1691,35 +1889,58 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
      * @param tx
      * @param sd
      * @param subscriptionKey
-     * @param sequenceId
+     * @param messageSequence
      * @throws IOException
      */
-    private void removeAckLocation(Transaction tx, StoredDestination sd, String subscriptionKey, Long sequenceId) throws IOException {
+    private void removeAckLocation(Transaction tx, StoredDestination sd, String subscriptionKey, Long messageSequence) throws IOException {
         // Remove the sub from the previous location set..
-        if (sequenceId != null) {
-            HashSet<String> hs = sd.ackPositions.get(tx, sequenceId);
-            if (hs != null) {
-                hs.remove(subscriptionKey);
-                if (hs.isEmpty()) {
-                    HashSet<String> firstSet = sd.ackPositions.getFirst(tx).getValue();
-                    sd.ackPositions.remove(tx, sequenceId);
-
-                    // Find all the entries that need to get deleted.
-                    ArrayList<Entry<Long, MessageKeys>> deletes = new ArrayList<Entry<Long, MessageKeys>>();
-                    sd.orderIndex.getDeleteList(tx, deletes, sequenceId);
-
-                    // Do the actual deletes.
-                    for (Entry<Long, MessageKeys> entry : deletes) {
-                        sd.locationIndex.remove(tx, entry.getValue().location);
-                        sd.messageIdIndex.remove(tx, entry.getValue().messageId);
-                        sd.orderIndex.remove(tx, entry.getKey());
-                    }
+        if (messageSequence != null) {
+            SequenceSet range = sd.ackPositions.get(tx, subscriptionKey);
+            if (range != null && !range.isEmpty()) {
+                range.remove(messageSequence);
+                if (!range.isEmpty()) {
+                    sd.ackPositions.put(tx, subscriptionKey, range);
                 } else {
-                    // update
-                    sd.ackPositions.put(tx, sequenceId, hs);
+                    sd.ackPositions.remove(tx, subscriptionKey);
+                }
+
+                // Check if the message is reference by any other subscription.
+                Long count = sd.messageReferences.get(messageSequence);
+                long references = count.longValue() - 1;
+                if (references > 0) {
+                    sd.messageReferences.put(messageSequence, Long.valueOf(references));
+                    return;
+                } else {
+                    sd.messageReferences.remove(messageSequence);
+                }
+
+                // Find all the entries that need to get deleted.
+                ArrayList<Entry<Long, MessageKeys>> deletes = new ArrayList<Entry<Long, MessageKeys>>();
+                sd.orderIndex.getDeleteList(tx, deletes, messageSequence);
+
+                // Do the actual deletes.
+                for (Entry<Long, MessageKeys> entry : deletes) {
+                    sd.locationIndex.remove(tx, entry.getValue().location);
+                    sd.messageIdIndex.remove(tx, entry.getValue().messageId);
+                    sd.orderIndex.remove(tx, entry.getKey());
                 }
             }
         }
+    }
+
+    public LastAck getLastAck(Transaction tx, StoredDestination sd, String subscriptionKey) throws IOException {
+        return sd.subscriptionAcks.get(tx, subscriptionKey);
+    }
+
+    public long getStoredMessageCount(Transaction tx, StoredDestination sd, String subscriptionKey) throws IOException {
+        SequenceSet messageSequences = sd.ackPositions.get(tx, subscriptionKey);
+        if (messageSequences != null) {
+            long result = messageSequences.rangeSize();
+            // if there's anything in the range the last value is always the nextMessage marker, so remove 1.
+            return result > 0 ? result - 1 : 0;
+        }
+
+        return 0;
     }
 
     private String key(KahaDestination destination) {
@@ -1729,11 +1950,13 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
     // /////////////////////////////////////////////////////////////////
     // Transaction related implementation methods.
     // /////////////////////////////////////////////////////////////////
-    protected final LinkedHashMap<TransactionId, List<Operation>> inflightTransactions = new LinkedHashMap<TransactionId, List<Operation>>();
+    @SuppressWarnings("rawtypes")
+    private final LinkedHashMap<TransactionId, List<Operation>> inflightTransactions = new LinkedHashMap<TransactionId, List<Operation>>();
+    @SuppressWarnings("rawtypes")
     protected final LinkedHashMap<TransactionId, List<Operation>> preparedTransactions = new LinkedHashMap<TransactionId, List<Operation>>();
     protected final Set<String> ackedAndPrepared = new HashSet<String>();
 
-    // messages that have prepared (pending) acks cannot be redispatched unless the outcome is rollback,
+    // messages that have prepared (pending) acks cannot be re-dispatched unless the outcome is rollback,
     // till then they are skipped by the store.
     // 'at most once' XA guarantee
     public void trackRecoveredAcks(ArrayList<MessageAck> acks) {
@@ -1760,8 +1983,9 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         }
     }
 
+    @SuppressWarnings("rawtypes")
     private List<Operation> getInflightTx(KahaTransactionInfo info, Location location) {
-        TransactionId key = key(info);
+        TransactionId key = TransactionIdConversion.convert(info);
         List<Operation> tx;
         synchronized (inflightTransactions) {
             tx = inflightTransactions.get(key);
@@ -1773,27 +1997,17 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         return tx;
     }
 
+    @SuppressWarnings("unused")
     private TransactionId key(KahaTransactionInfo transactionInfo) {
-        if (transactionInfo.hasLocalTransacitonId()) {
-            KahaLocalTransactionId tx = transactionInfo.getLocalTransacitonId();
-            LocalTransactionId rc = new LocalTransactionId();
-            rc.setConnectionId(new ConnectionId(tx.getConnectionId()));
-            rc.setValue(tx.getTransacitonId());
-            return rc;
-        } else {
-            KahaXATransactionId tx = transactionInfo.getXaTransacitonId();
-            XATransactionId rc = new XATransactionId();
-            rc.setBranchQualifier(tx.getBranchQualifier().toByteArray());
-            rc.setGlobalTransactionId(tx.getGlobalTransactionId().toByteArray());
-            rc.setFormatId(tx.getFormatId());
-            return rc;
-        }
+        return TransactionIdConversion.convert(transactionInfo);
     }
 
-    abstract class Operation {
+    abstract class Operation <T extends JournalCommand<T>> {
+        final T command;
         final Location location;
 
-        public Operation(Location location) {
+        public Operation(T command, Location location) {
+            this.command = command;
             this.location = location;
         }
 
@@ -1801,15 +2015,17 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
             return location;
         }
 
+        public T getCommand() {
+            return command;
+        }
+
         abstract public void execute(Transaction tx) throws IOException;
     }
 
-    class AddOpperation extends Operation {
-        final KahaAddMessageCommand command;
+    class AddOpperation extends Operation<KahaAddMessageCommand> {
 
         public AddOpperation(KahaAddMessageCommand command, Location location) {
-            super(location);
-            this.command = command;
+            super(command, location);
         }
 
         @Override
@@ -1817,26 +2033,17 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
             upadateIndex(tx, command, location);
         }
 
-        public KahaAddMessageCommand getCommand() {
-            return command;
-        }
     }
 
-    class RemoveOpperation extends Operation {
-        final KahaRemoveMessageCommand command;
+    class RemoveOpperation extends Operation<KahaRemoveMessageCommand> {
 
         public RemoveOpperation(KahaRemoveMessageCommand command, Location location) {
-            super(location);
-            this.command = command;
+            super(command, location);
         }
 
         @Override
         public void execute(Transaction tx) throws IOException {
             updateIndex(tx, command, location);
-        }
-
-        public KahaRemoveMessageCommand getCommand() {
-            return command;
         }
     }
 
@@ -1849,18 +2056,20 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         index.setEnableWriteThread(isEnableIndexWriteAsync());
         index.setWriteBatchSize(getIndexWriteBatchSize());
         index.setPageCacheSize(indexCacheSize);
+        index.setUseLFRUEviction(isUseIndexLFRUEviction());
+        index.setLFUEvictionFactor(getIndexLFUEvictionFactor());
         return index;
     }
 
-    private JournalManager createJournalManager() throws IOException {
-        JournalManager manager = isJournalPerDestination() ? new DestinationJournalManager() : new DefaultJournalManager();
+    private Journal createJournal() throws IOException {
+        Journal manager = new Journal();
         manager.setDirectory(directory);
         manager.setMaxFileLength(getJournalMaxFileLength());
         manager.setCheckForCorruptionOnStartup(checkForCorruptJournalFiles);
         manager.setChecksum(checksumJournalFiles || checkForCorruptJournalFiles);
         manager.setWriteBatchSize(getJournalMaxWriteBatchSize());
         manager.setArchiveDataLogs(isArchiveDataLogs());
-        manager.setStoreSize(storeSize);
+        manager.setSizeAccumulator(storeSize);
         if (getDirectoryArchive() != null) {
             IOHelper.mkdirs(getDirectoryArchive());
             manager.setDirectoryArchive(getDirectoryArchive());
@@ -1963,15 +2172,11 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         return pageFile;
     }
 
-    public JournalManager getJournalManager() throws IOException {
-        if (journalManager == null) {
-            journalManager = createJournalManager();
+    public Journal getJournal() throws IOException {
+        if (journal == null) {
+            journal = createJournal();
         }
-        return journalManager;
-    }
-
-    public Journal getJournal(ActiveMQDestination destination) throws IOException {
-        return getJournalManager().getJournal(destination);
+        return journal;
     }
 
     public boolean isFailIfDatabaseIsLocked() {
@@ -2060,59 +2265,59 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         this.databaseLockedWaitDelay = databaseLockedWaitDelay;
     }
 
-    public boolean isJournalPerDestination() {
-        return journalPerDestination;
+    public boolean isRewriteOnRedelivery() {
+        return rewriteOnRedelivery;
     }
 
-    public void setJournalPerDestination(boolean journalPerDestination) {
-        this.journalPerDestination = journalPerDestination;
+    public void setRewriteOnRedelivery(boolean rewriteOnRedelivery) {
+        this.rewriteOnRedelivery = rewriteOnRedelivery;
+    }
+
+    public boolean isArchiveCorruptedIndex() {
+        return archiveCorruptedIndex;
+    }
+
+    public void setArchiveCorruptedIndex(boolean archiveCorruptedIndex) {
+        this.archiveCorruptedIndex = archiveCorruptedIndex;
+    }
+
+    public float getIndexLFUEvictionFactor() {
+        return indexLFUEvictionFactor;
+    }
+
+    public void setIndexLFUEvictionFactor(float indexLFUEvictionFactor) {
+        this.indexLFUEvictionFactor = indexLFUEvictionFactor;
+    }
+
+    public boolean isUseIndexLFRUEviction() {
+        return useIndexLFRUEviction;
+    }
+
+    public void setUseIndexLFRUEviction(boolean useIndexLFRUEviction) {
+        this.useIndexLFRUEviction = useIndexLFRUEviction;
     }
 
     // /////////////////////////////////////////////////////////////////
     // Internal conversion methods.
     // /////////////////////////////////////////////////////////////////
 
-    KahaTransactionInfo createTransactionInfo(TransactionId txid) {
-        if (txid == null) {
-            return null;
-        }
-        KahaTransactionInfo rc = new KahaTransactionInfo();
-
-        if (txid.isLocalTransaction()) {
-            LocalTransactionId t = (LocalTransactionId) txid;
-            KahaLocalTransactionId kahaTxId = new KahaLocalTransactionId();
-            kahaTxId.setConnectionId(t.getConnectionId().getValue());
-            kahaTxId.setTransacitonId(t.getValue());
-            rc.setLocalTransacitonId(kahaTxId);
-        } else {
-            XATransactionId t = (XATransactionId) txid;
-            KahaXATransactionId kahaTxId = new KahaXATransactionId();
-            kahaTxId.setBranchQualifier(new Buffer(t.getBranchQualifier()));
-            kahaTxId.setGlobalTransactionId(new Buffer(t.getGlobalTransactionId()));
-            kahaTxId.setFormatId(t.getFormatId());
-            rc.setXaTransacitonId(kahaTxId);
-        }
-        return rc;
-    }
-
-    class MessageOrderCursor {
+    class MessageOrderCursor{
         long defaultCursorPosition;
         long lowPriorityCursorPosition;
         long highPriorityCursorPosition;
-
-        MessageOrderCursor() {
+        MessageOrderCursor(){
         }
 
-        MessageOrderCursor(long position) {
-            this.defaultCursorPosition = position;
-            this.lowPriorityCursorPosition = position;
-            this.highPriorityCursorPosition = position;
+        MessageOrderCursor(long position){
+            this.defaultCursorPosition=position;
+            this.lowPriorityCursorPosition=position;
+            this.highPriorityCursorPosition=position;
         }
 
-        MessageOrderCursor(MessageOrderCursor other) {
-            this.defaultCursorPosition = other.defaultCursorPosition;
-            this.lowPriorityCursorPosition = other.lowPriorityCursorPosition;
-            this.highPriorityCursorPosition = other.highPriorityCursorPosition;
+        MessageOrderCursor(MessageOrderCursor other){
+            this.defaultCursorPosition=other.defaultCursorPosition;
+            this.lowPriorityCursorPosition=other.lowPriorityCursorPosition;
+            this.highPriorityCursorPosition=other.highPriorityCursorPosition;
         }
 
         MessageOrderCursor copy() {
@@ -2120,33 +2325,33 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         }
 
         void reset() {
-            this.defaultCursorPosition = 0;
-            this.highPriorityCursorPosition = 0;
-            this.lowPriorityCursorPosition = 0;
+            this.defaultCursorPosition=0;
+            this.highPriorityCursorPosition=0;
+            this.lowPriorityCursorPosition=0;
         }
 
         void increment() {
-            if (defaultCursorPosition != 0) {
+            if (defaultCursorPosition!=0) {
                 defaultCursorPosition++;
             }
-            if (highPriorityCursorPosition != 0) {
+            if (highPriorityCursorPosition!=0) {
                 highPriorityCursorPosition++;
             }
-            if (lowPriorityCursorPosition != 0) {
+            if (lowPriorityCursorPosition!=0) {
                 lowPriorityCursorPosition++;
             }
         }
 
         public String toString() {
-            return "MessageOrderCursor:[def:" + defaultCursorPosition
-                    + ", low:" + lowPriorityCursorPosition
-                    + ", high:" + highPriorityCursorPosition + "]";
+           return "MessageOrderCursor:[def:" + defaultCursorPosition
+                   + ", low:" + lowPriorityCursorPosition
+                   + ", high:" +  highPriorityCursorPosition + "]";
         }
 
         public void sync(MessageOrderCursor other) {
-            this.defaultCursorPosition = other.defaultCursorPosition;
-            this.lowPriorityCursorPosition = other.lowPriorityCursorPosition;
-            this.highPriorityCursorPosition = other.highPriorityCursorPosition;
+            this.defaultCursorPosition=other.defaultCursorPosition;
+            this.lowPriorityCursorPosition=other.lowPriorityCursorPosition;
+            this.highPriorityCursorPosition=other.highPriorityCursorPosition;
         }
     }
 
@@ -2167,9 +2372,9 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
 
         MessageKeys remove(Transaction tx, Long key) throws IOException {
             MessageKeys result = defaultPriorityIndex.remove(tx, key);
-            if (result == null && highPriorityIndex != null) {
+            if (result == null && highPriorityIndex!=null) {
                 result = highPriorityIndex.remove(tx, key);
-                if (result == null && lowPriorityIndex != null) {
+                if (result ==null && lowPriorityIndex!=null) {
                     result = lowPriorityIndex.remove(tx, key);
                 }
             }
@@ -2220,7 +2425,6 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                 }
             }
         }
-
 
         void remove(Transaction tx) throws IOException {
             defaultPriorityIndex.clear(tx);
@@ -2292,14 +2496,14 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         }
 
         void stoppedIterating() {
-            if (lastDefaultKey != null) {
-                cursor.defaultCursorPosition = lastDefaultKey.longValue() + 1;
+            if (lastDefaultKey!=null) {
+                cursor.defaultCursorPosition=lastDefaultKey.longValue()+1;
             }
-            if (lastHighKey != null) {
-                cursor.highPriorityCursorPosition = lastHighKey.longValue() + 1;
+            if (lastHighKey!=null) {
+                cursor.highPriorityCursorPosition=lastHighKey.longValue()+1;
             }
-            if (lastLowKey != null) {
-                cursor.lowPriorityCursorPosition = lastLowKey.longValue() + 1;
+            if (lastLowKey!=null) {
+                cursor.lowPriorityCursorPosition=lastLowKey.longValue()+1;
             }
             lastDefaultKey = null;
             lastHighKey = null;
@@ -2318,7 +2522,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
         }
 
         void getDeleteList(Transaction tx, ArrayList<Entry<Long, MessageKeys>> deletes,
-                           BTreeIndex<Long, MessageKeys> index, Long sequenceId) throws IOException {
+                BTreeIndex<Long, MessageKeys> index, Long sequenceId) throws IOException {
 
             Iterator<Entry<Long, MessageKeys>> iterator = index.iterator(tx, sequenceId);
             deletes.add(iterator.next());
@@ -2354,24 +2558,23 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
             }
         }
 
-        Iterator<Entry<Long, MessageKeys>> iterator(Transaction tx) throws IOException {
-            return new MessageOrderIterator(tx, cursor);
+        Iterator<Entry<Long, MessageKeys>> iterator(Transaction tx) throws IOException{
+            return new MessageOrderIterator(tx,cursor);
         }
 
-        Iterator<Entry<Long, MessageKeys>> iterator(Transaction tx, MessageOrderCursor m) throws IOException {
-            return new MessageOrderIterator(tx, m);
+        Iterator<Entry<Long, MessageKeys>> iterator(Transaction tx, MessageOrderCursor m) throws IOException{
+            return new MessageOrderIterator(tx,m);
         }
 
         public byte lastGetPriority() {
             return lastGetPriority;
         }
 
-        class MessageOrderIterator implements Iterator<Entry<Long, MessageKeys>> {
-            Iterator<Entry<Long, MessageKeys>> currentIterator;
-            final Iterator<Entry<Long, MessageKeys>> highIterator;
-            final Iterator<Entry<Long, MessageKeys>> defaultIterator;
-            final Iterator<Entry<Long, MessageKeys>> lowIterator;
-
+        class MessageOrderIterator implements Iterator<Entry<Long, MessageKeys>>{
+            Iterator<Entry<Long, MessageKeys>>currentIterator;
+            final Iterator<Entry<Long, MessageKeys>>highIterator;
+            final Iterator<Entry<Long, MessageKeys>>defaultIterator;
+            final Iterator<Entry<Long, MessageKeys>>lowIterator;
 
             MessageOrderIterator(Transaction tx, MessageOrderCursor m) throws IOException {
                 this.defaultIterator = defaultPriorityIndex.iterator(tx, m.defaultCursorPosition);
@@ -2423,6 +2626,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
                         }
                         return false;
                     }
+
                     if (currentIterator == defaultIterator) {
                         if (lowIterator.hasNext()) {
                             currentIterator = lowIterator;
@@ -2474,6 +2678,7 @@ public class MessageDatabase extends ServiceSupport implements BrokerServiceAwar
             dataOut.write(data);
         }
 
+        @SuppressWarnings("unchecked")
         public HashSet<String> readPayload(DataInput dataIn) throws IOException {
             int dataLen = dataIn.readInt();
             byte[] data = new byte[dataLen];

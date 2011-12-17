@@ -45,7 +45,7 @@ import org.slf4j.LoggerFactory;
 
 /**
  * @org.apache.xbean.XBean
- * 
+ *
  */
 public class TransportConnector implements Connector, BrokerServiceAware {
 
@@ -71,6 +71,7 @@ public class TransportConnector implements Connector, BrokerServiceAware {
     private boolean rebalanceClusterClients;
     private boolean updateClusterClientsOnRemove = false;
     private String updateClusterFilter;
+    private boolean auditNetworkProducers = false;
 
     public TransportConnector() {
     }
@@ -116,6 +117,7 @@ public class TransportConnector implements Connector, BrokerServiceAware {
         rc.setRebalanceClusterClients(isRebalanceClusterClients());
         rc.setUpdateClusterFilter(getUpdateClusterFilter());
         rc.setUpdateClusterClientsOnRemove(isUpdateClusterClientsOnRemove());
+        rc.setAuditNetworkProducers(isAuditNetworkProducers());
         return rc;
     }
 
@@ -128,7 +130,7 @@ public class TransportConnector implements Connector, BrokerServiceAware {
     }
 
     /**
-     * 
+     *
      * @deprecated use the {@link #setBrokerService(BrokerService)} method
      *             instead.
      */
@@ -166,7 +168,7 @@ public class TransportConnector implements Connector, BrokerServiceAware {
      * {@link TransportServer} configured via the
      * {@link #setServer(TransportServer)} method. This value is used to lazy
      * create a {@link TransportServer} instance
-     * 
+     *
      * @param uri
      */
     public void setUri(URI uri) {
@@ -216,8 +218,9 @@ public class TransportConnector implements Connector, BrokerServiceAware {
                                 Connection connection = createConnection(transport);
                                 connection.start();
                             } catch (Exception e) {
+                                String remoteHost = transport.getRemoteAddress();
                                 ServiceSupport.dispose(transport);
-                                onAcceptError(e);
+                                onAcceptError(e, remoteHost);
                             }
                         }
                     });
@@ -279,7 +282,6 @@ public class TransportConnector implements Connector, BrokerServiceAware {
         }
         if (server != null) {
             ss.stop(server);
-            server = null;
         }
         if (this.statusDector != null) {
             this.statusDector.stop();
@@ -289,6 +291,7 @@ public class TransportConnector implements Connector, BrokerServiceAware {
             TransportConnection c = iter.next();
             ss.stop(c);
         }
+        server = null;
         ss.throwFirstException();
         LOG.info("Connector " + getName() + " Stopped");
     }
@@ -524,7 +527,7 @@ public class TransportConnector implements Connector, BrokerServiceAware {
     public void setRebalanceClusterClients(boolean rebalanceClusterClients) {
         this.rebalanceClusterClients = rebalanceClusterClients;
     }
- 
+
     /**
      * @return the updateClusterClientsOnRemove
      */
@@ -538,7 +541,7 @@ public class TransportConnector implements Connector, BrokerServiceAware {
     public void setUpdateClusterClientsOnRemove(boolean updateClusterClientsOnRemove) {
         this.updateClusterClientsOnRemove = updateClusterClientsOnRemove;
     }
-    
+
     /**
      * @return the updateClusterFilter
      */
@@ -556,5 +559,18 @@ public class TransportConnector implements Connector, BrokerServiceAware {
 
     public int connectionCount() {
         return connections.size();
+    }
+
+    public boolean isAuditNetworkProducers() {
+        return auditNetworkProducers;
+    }
+
+    /**
+     * Enable a producer audit on network connections, Traps the case of a missing send reply and resend.
+     * Note: does not work with conduit=false, networked composite destinations or networked virtual topics
+     * @param auditNetworkProducers
+     */
+    public void setAuditNetworkProducers(boolean auditNetworkProducers) {
+        this.auditNetworkProducers = auditNetworkProducers;
     }
 }

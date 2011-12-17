@@ -42,6 +42,7 @@ import org.slf4j.LoggerFactory;
  */
 public class StompTransportFilter extends TransportFilter implements StompTransport {
     private static final Logger LOG = LoggerFactory.getLogger(StompTransportFilter.class);
+    private static final Logger TRACE = LoggerFactory.getLogger(StompTransportFilter.class.getPackage().getName() + ".StompIO");
     private final ProtocolConverter protocolConverter;
     private StompInactivityMonitor monitor;
     private StompWireFormat wireFormat;
@@ -59,7 +60,7 @@ public class StompTransportFilter extends TransportFilter implements StompTransp
 
     public void oneway(Object o) throws IOException {
         try {
-            final Command command = (Command)o;
+            final Command command = (Command) o;
             protocolConverter.onActiveMQCommand(command);
         } catch (JMSException e) {
             throw IOExceptionSupport.create(e);
@@ -69,10 +70,10 @@ public class StompTransportFilter extends TransportFilter implements StompTransp
     public void onCommand(Object command) {
         try {
             if (trace) {
-                LOG.trace("Received: \n" + command);
+                TRACE.trace("Received: \n" + command);
             }
 
-            protocolConverter.onStompCommand((StompFrame)command);
+            protocolConverter.onStompCommand((StompFrame) command);
         } catch (IOException e) {
             onException(e);
         } catch (JMSException e) {
@@ -82,24 +83,24 @@ public class StompTransportFilter extends TransportFilter implements StompTransp
 
     public void sendToActiveMQ(Command command) {
         TransportListener l = transportListener;
-        if (l!=null) {
+        if (l != null) {
             l.onCommand(command);
         }
     }
 
     public void sendToStomp(StompFrame command) throws IOException {
         if (trace) {
-            LOG.trace("Sending: \n" + command);
+            TRACE.trace("Sending: \n" + command);
         }
         Transport n = next;
-        if (n!=null) {
+        if (n != null) {
             n.oneway(command);
         }
     }
 
     public X509Certificate[] getPeerCertificates() {
-        if(next instanceof SslTransport) {
-            X509Certificate[] peerCerts = ((SslTransport)next).getPeerCertificates();
+        if (next instanceof SslTransport) {
+            X509Certificate[] peerCerts = ((SslTransport) next).getPeerCertificates();
             if (trace && peerCerts != null) {
                 LOG.debug("Peer Identity has been verified\n");
             }
@@ -129,4 +130,13 @@ public class StompTransportFilter extends TransportFilter implements StompTransp
     public StompWireFormat getWireFormat() {
         return this.wireFormat;
     }
+
+    public String getDefaultHeartBeat() {
+        return protocolConverter != null ? protocolConverter.getDefaultHeartBeat() : null;
+    }
+
+    public void setDefaultHeartBeat(String defaultHeartBeat) {
+        protocolConverter.setDefaultHeartBeat(defaultHeartBeat);
+    }
+
 }

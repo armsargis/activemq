@@ -16,8 +16,11 @@
  */
 package org.apache.activemq.network;
 
-import java.util.List;
+import org.apache.activemq.advisory.AdvisorySupport;
 import org.apache.activemq.command.ActiveMQDestination;
+import org.apache.activemq.command.ConsumerInfo;
+
+import java.util.List;
 
 /**
  * Configuration for a NetworkBridge
@@ -25,11 +28,11 @@ import org.apache.activemq.command.ActiveMQDestination;
  * 
  */
 public class NetworkBridgeConfiguration {
-
     private boolean conduitSubscriptions = true;
     private boolean dynamicOnly;
     private boolean dispatchAsync = true;
     private boolean decreaseNetworkConsumerPriority;
+    private int consumerPriorityBase = ConsumerInfo.NETWORK_CONSUMER_PRIORITY;
     private boolean duplex;
     private boolean bridgeTempDestinations = true;
     private int prefetchSize = 1000;
@@ -38,7 +41,7 @@ public class NetworkBridgeConfiguration {
     private String brokerURL = "";
     private String userName;
     private String password;
-    private String destinationFilter = ">";
+    private String destinationFilter = null;
     private String name = "NC";
     
     private List<ActiveMQDestination> excludedDestinations;
@@ -48,6 +51,8 @@ public class NetworkBridgeConfiguration {
     private boolean suppressDuplicateQueueSubscriptions = false;
     private boolean suppressDuplicateTopicSubscriptions = true;
 
+    private boolean alwaysSyncSend = false;
+    private boolean staticBridge = false;
 
     /**
      * @return the conduitSubscriptions
@@ -209,7 +214,33 @@ public class NetworkBridgeConfiguration {
      * @return the destinationFilter
      */
     public String getDestinationFilter() {
-        return this.destinationFilter;
+        if (this.destinationFilter == null) {
+            if (dynamicallyIncludedDestinations != null && !dynamicallyIncludedDestinations.isEmpty()) {
+                StringBuffer filter = new StringBuffer();
+                String delimiter = "";
+                for (ActiveMQDestination destination : dynamicallyIncludedDestinations) {
+                    if (!destination.isTemporary()) {
+                        filter.append(delimiter);
+                        filter.append(AdvisorySupport.CONSUMER_ADVISORY_TOPIC_PREFIX);
+                        filter.append(destination.getDestinationTypeAsString());
+                        filter.append(".");
+                        filter.append(destination.getPhysicalName());
+                        delimiter = ",";
+                    }
+                }
+                return filter.toString();
+            }   else {
+                return AdvisorySupport.CONSUMER_ADVISORY_TOPIC_PREFIX + ">";
+            }
+        }   else {
+            // prepend consumer advisory prefix
+            // to keep backward compatibility
+            if (!this.destinationFilter.startsWith(AdvisorySupport.CONSUMER_ADVISORY_TOPIC_PREFIX)) {
+                 return AdvisorySupport.CONSUMER_ADVISORY_TOPIC_PREFIX + this.destinationFilter;
+            } else {
+                return this.destinationFilter;
+            }
+        }
     }
 
     /**
@@ -298,5 +329,43 @@ public class NetworkBridgeConfiguration {
      */
     public void setBrokerURL(String brokerURL) {
         this.brokerURL = brokerURL;
+    }
+
+    public boolean isAlwaysSyncSend() {
+        return alwaysSyncSend;
+    }
+
+    /**
+     * @param alwaysSyncSend  when true, both persistent and non persistent
+     * messages will be sent using a request. When false, non persistent messages
+     * are acked once the oneway send succeeds, which can potentially lead to
+     * message loss.
+     * Using an async request, allows multiple outstanding requests. This ensures
+     * that a bridge need not block all sending when the remote broker needs to
+     * flow control a single destination.
+     */
+    public void setAlwaysSyncSend(boolean alwaysSyncSend) {
+        this.alwaysSyncSend = alwaysSyncSend;
+    }
+
+    public int getConsumerPriorityBase() {
+        return consumerPriorityBase;
+    }
+
+    /**
+     * @param consumerPriorityBase , default -5. Sets the starting priority
+     * for consumers. This base value will be decremented by the length of the
+     * broker path when decreaseNetworkConsumerPriority is set.
+     */
+    public void setConsumerPriorityBase(int consumerPriorityBase) {
+        this.consumerPriorityBase = consumerPriorityBase;
+    }
+
+    public boolean isStaticBridge() {
+        return staticBridge;
+    }
+
+    public void setStaticBridge(boolean staticBridge) {
+        this.staticBridge = staticBridge;
     }
 }

@@ -20,22 +20,41 @@ import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.net.URI;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 
 import org.apache.activemq.command.ShutdownInfo;
 import org.apache.activemq.transport.FutureResponse;
 import org.apache.activemq.transport.util.TextWireFormat;
-import org.apache.activemq.util.ByteArrayInputStream;
+import org.apache.activemq.util.ByteArrayOutputStream;
 import org.apache.activemq.util.IOExceptionSupport;
 import org.apache.activemq.util.IdGenerator;
 import org.apache.activemq.util.ServiceStopper;
-import org.apache.commons.httpclient.HttpClient;
-import org.apache.commons.httpclient.HttpMethod;
-import org.apache.commons.httpclient.HttpStatus;
-import org.apache.commons.httpclient.methods.GetMethod;
-import org.apache.commons.httpclient.methods.HeadMethod;
-import org.apache.commons.httpclient.methods.InputStreamRequestEntity;
-import org.apache.commons.httpclient.methods.PostMethod;
-import org.apache.commons.httpclient.params.HttpClientParams;
+import org.apache.http.Header;
+import org.apache.http.HttpHost;
+import org.apache.http.HttpRequest;
+import org.apache.http.HttpRequestInterceptor;
+import org.apache.http.HttpResponse;
+import org.apache.http.HttpStatus;
+import org.apache.http.auth.AuthScope;
+import org.apache.http.auth.UsernamePasswordCredentials;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.HttpResponseException;
+import org.apache.http.client.ResponseHandler;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.HttpHead;
+import org.apache.http.client.methods.HttpOptions;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.conn.params.ConnRoutePNames;
+import org.apache.http.entity.ByteArrayEntity;
+import org.apache.http.impl.client.BasicResponseHandler;
+import org.apache.http.impl.client.DefaultHttpClient;
+import org.apache.http.impl.conn.tsccm.ThreadSafeClientConnManager;
+import org.apache.http.message.AbstractHttpMessage;
+import org.apache.http.params.HttpConnectionParams;
+import org.apache.http.params.HttpParams;
+import org.apache.http.protocol.HttpContext;
+import org.apache.http.util.EntityUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,8 +62,6 @@ import org.slf4j.LoggerFactory;
  * A HTTP {@link org.apache.activemq.transport.TransportChannel} which uses the
  * <a href="http://jakarta.apache.org/commons/httpclient/">commons-httpclient</a>
  * library
- * 
- * 
  */
 public class HttpClientTransport extends HttpTransportSupport {
 
@@ -57,11 +74,15 @@ public class HttpClientTransport extends HttpTransportSupport {
 
     private final String clientID = CLIENT_ID_GENERATOR.generateId();
     private boolean trace;
-    private GetMethod httpMethod;
+    private HttpGet httpMethod;
     private volatile int receiveCounter;
 
     private int soTimeout = MAX_CLIENT_TIMEOUT;
-    
+
+    private boolean useCompression = false;
+    private boolean canSendCompressed = false;
+    private int minSendAsCompressedSize = 0;
+
     public HttpClientTransport(TextWireFormat wireFormat, URI remoteUrl) {
         super(wireFormat, remoteUrl);
     }
@@ -75,35 +96,48 @@ public class HttpClientTransport extends HttpTransportSupport {
         if (isStopped()) {
             throw new IOException("stopped.");
         }
-        PostMethod httpMethod = new PostMethod(getRemoteUrl().toString());
+        HttpPost httpMethod = new HttpPost(getRemoteUrl().toString());
         configureMethod(httpMethod);
         String data = getTextWireFormat().marshalText(command);
         byte[] bytes = data.getBytes("UTF-8");
-        InputStreamRequestEntity entity = new InputStreamRequestEntity(new ByteArrayInputStream(bytes));
-        httpMethod.setRequestEntity(entity);
+        if (useCompression && canSendCompressed && bytes.length > minSendAsCompressedSize) {
+            ByteArrayOutputStream bytesOut = new ByteArrayOutputStream();
+            GZIPOutputStream stream = new GZIPOutputStream(bytesOut);
+            stream.write(bytes);
+            stream.close();
+            httpMethod.addHeader("Content-Type", "application/x-gzip");
+            if (LOG.isTraceEnabled()) {
+                LOG.trace("Sending compressed, size = " + bytes.length + ", compressed size = " + bytesOut.size());
+            }
+            bytes = bytesOut.toByteArray();
+        }
+        ByteArrayEntity entity = new ByteArrayEntity(bytes);
+        httpMethod.setEntity(entity);
 
+        HttpClient client = null;
+        HttpResponse answer = null;
         try {
-
-            HttpClient client = getSendHttpClient();
-            HttpClientParams params = new HttpClientParams();
-            params.setSoTimeout(soTimeout);
-            client.setParams(params);
-            int answer = client.executeMethod(httpMethod);
-            if (answer != HttpStatus.SC_OK) {
+            client = getSendHttpClient();
+            HttpParams params = client.getParams();
+            HttpConnectionParams.setSoTimeout(params, soTimeout);
+            answer = client.execute(httpMethod);
+            int status = answer.getStatusLine().getStatusCode();
+            if (status != HttpStatus.SC_OK) {
                 throw new IOException("Failed to post command: " + command + " as response was: " + answer);
             }
             if (command instanceof ShutdownInfo) {
-            	try {
-            		stop();
-            	} catch (Exception e) {
-            		LOG.warn("Error trying to stop HTTP client: "+ e, e);
-            	}
+                try {
+                    stop();
+                } catch (Exception e) {
+                    LOG.warn("Error trying to stop HTTP client: "+ e, e);
+                }
             }
         } catch (IOException e) {
             throw IOExceptionSupport.create("Could not post command: " + command + " due to: " + e, e);
         } finally {
-            httpMethod.getResponseBody();
-            httpMethod.releaseConnection();
+            if (answer != null) {
+                EntityUtils.consume(answer.getEntity());
+            }
         }
     }
 
@@ -111,21 +145,34 @@ public class HttpClientTransport extends HttpTransportSupport {
         return null;
     }
 
+    private DataInputStream createDataInputStream(HttpResponse answer) throws IOException {
+        Header encoding = answer.getEntity().getContentEncoding();
+        if (encoding != null && "gzip".equalsIgnoreCase(encoding.getValue())) {
+            return new DataInputStream(new GZIPInputStream(answer.getEntity().getContent()));
+        } else {
+            return new DataInputStream(answer.getEntity().getContent());
+        }
+    }
+
     public void run() {
 
-        LOG.trace("HTTP GET consumer thread starting: " + this);
+        if (LOG.isTraceEnabled()) {
+            LOG.trace("HTTP GET consumer thread starting: " + this);
+        }
         HttpClient httpClient = getReceiveHttpClient();
         URI remoteUrl = getRemoteUrl();
 
         while (!isStopped() && !isStopping()) {
 
-            httpMethod = new GetMethod(remoteUrl.toString());
+            httpMethod = new HttpGet(remoteUrl.toString());
             configureMethod(httpMethod);
+            HttpResponse answer = null;
 
             try {
-                int answer = httpClient.executeMethod(httpMethod);
-                if (answer != HttpStatus.SC_OK) {
-                    if (answer == HttpStatus.SC_REQUEST_TIMEOUT) {
+                answer = httpClient.execute(httpMethod);
+                int status = answer.getStatusLine().getStatusCode();
+                if (status != HttpStatus.SC_OK) {
+                    if (status == HttpStatus.SC_REQUEST_TIMEOUT) {
                         LOG.debug("GET timed out");
                         try {
                             Thread.sleep(1000);
@@ -139,19 +186,25 @@ public class HttpClientTransport extends HttpTransportSupport {
                     }
                 } else {
                     receiveCounter++;
-                    DataInputStream stream = new DataInputStream(httpMethod.getResponseBodyAsStream());
+                    DataInputStream stream = createDataInputStream(answer);
                     Object command = (Object)getTextWireFormat().unmarshal(stream);
                     if (command == null) {
                         LOG.debug("Received null command from url: " + remoteUrl);
                     } else {
                         doConsume(command);
                     }
+                    stream.close();
                 }
             } catch (IOException e) {
                 onException(IOExceptionSupport.create("Failed to perform GET on: " + remoteUrl + " Reason: " + e.getMessage(), e));
                 break;
             } finally {
-                httpMethod.releaseConnection();
+                if (answer != null) {
+                    try {
+                        EntityUtils.consume(answer.getEntity());
+                    } catch (IOException e) {
+                    }
+                }
             }
         }
     }
@@ -184,16 +237,42 @@ public class HttpClientTransport extends HttpTransportSupport {
     // -------------------------------------------------------------------------
     protected void doStart() throws Exception {
 
-        LOG.trace("HTTP GET consumer thread starting: " + this);
+        if (LOG.isTraceEnabled()) {
+            LOG.trace("HTTP GET consumer thread starting: " + this);
+        }
         HttpClient httpClient = getReceiveHttpClient();
         URI remoteUrl = getRemoteUrl();
 
-        HeadMethod httpMethod = new HeadMethod(remoteUrl.toString());
+        HttpHead httpMethod = new HttpHead(remoteUrl.toString());
         configureMethod(httpMethod);
 
-        int answer = httpClient.executeMethod(httpMethod);
-        if (answer != HttpStatus.SC_OK) {
-            throw new IOException("Failed to perform GET on: " + remoteUrl + " as response was: " + answer);
+        // Request the options from the server so we can find out if the broker we are
+        // talking to supports GZip compressed content.  If so and useCompression is on
+        // then we can compress our POST data, otherwise we must send it uncompressed to
+        // ensure backwards compatibility.
+        HttpOptions optionsMethod = new HttpOptions(remoteUrl.toString());
+        ResponseHandler<String> handler = new BasicResponseHandler() {
+            @Override
+            public String handleResponse(HttpResponse response) throws HttpResponseException, IOException {
+
+                for(Header header : response.getAllHeaders()) {
+                    if (header.getName().equals("Accepts-Encoding") && header.getValue().contains("gzip")) {
+                        LOG.info("Broker Servlet supports GZip compression.");
+                        canSendCompressed = true;
+                        break;
+                    }
+                }
+
+                return super.handleResponse(response);
+            }
+        };
+
+
+        try {
+            httpClient.execute(httpMethod, new BasicResponseHandler());
+            httpClient.execute(optionsMethod, handler);
+        } catch(Exception e) {
+            throw new IOException("Failed to perform GET on: " + remoteUrl + " as response was: " + e.getMessage());
         }
 
         super.doStart();
@@ -206,15 +285,31 @@ public class HttpClientTransport extends HttpTransportSupport {
     }
 
     protected HttpClient createHttpClient() {
-        HttpClient client = new HttpClient();
+        DefaultHttpClient client = new DefaultHttpClient(new ThreadSafeClientConnManager());
+        if (useCompression) {
+            client.addRequestInterceptor( new HttpRequestInterceptor() {
+                @Override
+                public void process(HttpRequest request, HttpContext context) {
+                    // We expect to received a compression response that we un-gzip
+                    request.addHeader("Accept-Encoding", "gzip");
+                }
+            });
+        }
         if (getProxyHost() != null) {
-            client.getHostConfiguration().setProxy(getProxyHost(), getProxyPort());
+            HttpHost proxy = new HttpHost(getProxyHost(), getProxyPort());
+            client.getParams().setParameter(ConnRoutePNames.DEFAULT_PROXY, proxy);
+
+            if(getProxyUser() != null && getProxyPassword() != null) {
+                client.getCredentialsProvider().setCredentials(
+                    new AuthScope(getProxyHost(), getProxyPort()),
+                    new UsernamePasswordCredentials(getProxyUser(), getProxyPassword()));
+            }
         }
         return client;
     }
 
-    protected void configureMethod(HttpMethod method) {
-        method.setRequestHeader("clientID", clientID);
+    protected void configureMethod(AbstractHttpMessage method) {
+        method.setHeader("clientID", clientID);
     }
 
     public boolean isTrace() {
@@ -236,4 +331,30 @@ public class HttpClientTransport extends HttpTransportSupport {
     public void setSoTimeout(int soTimeout) {
         this.soTimeout = soTimeout;
     }
+
+    public void setUseCompression(boolean useCompression) {
+        this.useCompression = useCompression;
+    }
+
+    public boolean isUseCompression() {
+        return this.useCompression;
+    }
+
+    public int getMinSendAsCompressedSize() {
+        return minSendAsCompressedSize;
+    }
+
+    /**
+     * Sets the minimum size that must be exceeded on a send before compression is used if
+     * the useCompression option is specified.  For very small payloads compression can be
+     * inefficient compared to the transmission size savings.
+     *
+     * Default value is 0.
+     *
+     * @param minSendAsCompressedSize
+     */
+    public void setMinSendAsCompressedSize(int minSendAsCompressedSize) {
+        this.minSendAsCompressedSize = minSendAsCompressedSize;
+    }
+
 }

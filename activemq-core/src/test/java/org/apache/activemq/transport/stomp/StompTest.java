@@ -22,8 +22,10 @@ import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.UnknownHostException;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -36,6 +38,7 @@ import javax.jms.MessageProducer;
 import javax.jms.ObjectMessage;
 import javax.jms.Session;
 import javax.jms.TextMessage;
+import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
 
 import org.apache.activemq.ActiveMQConnectionFactory;
@@ -43,6 +46,7 @@ import org.apache.activemq.CombinationTestSupport;
 import org.apache.activemq.broker.BrokerFactory;
 import org.apache.activemq.broker.BrokerService;
 import org.apache.activemq.broker.jmx.BrokerViewMBean;
+import org.apache.activemq.broker.jmx.QueueViewMBean;
 import org.apache.activemq.command.ActiveMQQueue;
 import org.apache.activemq.command.ActiveMQTextMessage;
 import org.slf4j.Logger;
@@ -54,7 +58,6 @@ public class StompTest extends CombinationTestSupport {
     protected String bindAddress = "stomp://localhost:61613";
     protected String confUri = "xbean:org/apache/activemq/transport/stomp/stomp-auth-broker.xml";
     protected String jmsUri = "vm://localhost";
-
 
     private BrokerService broker;
     private StompConnection stompConnection = new StompConnection();
@@ -112,6 +115,7 @@ public class StompTest extends CombinationTestSupport {
                 + "}}";
         }
         broker = BrokerFactory.createBroker(new URI(confUri));
+        broker.setDeleteAllMessagesOnStartup(true);
         broker.start();
         broker.waitUntilStarted();
 
@@ -127,6 +131,11 @@ public class StompTest extends CombinationTestSupport {
     private void stompConnect() throws IOException, URISyntaxException, UnknownHostException {
         URI connectUri = new URI(bindAddress);
         stompConnection.open(createSocket(connectUri));
+    }
+
+    private void stompConnect(StompConnection connection) throws IOException, URISyntaxException, UnknownHostException {
+        URI connectUri = new URI(bindAddress);
+        connection.open(createSocket(connectUri));
     }
 
     protected Socket createSocket(URI connectUri) throws IOException {
@@ -372,6 +381,60 @@ public class StompTest extends CombinationTestSupport {
 
         frame = "DISCONNECT\n" + "\n\n" + Stomp.NULL;
         stompConnection.sendFrame(frame);
+    }
+
+
+    public void testSubscriptionReceipts() throws Exception {
+        final int done = 500;
+        int count = 0;
+        int receiptId = 0;
+
+        URI connectUri = new URI(bindAddress);
+
+        do {
+
+            StompConnection sender = new StompConnection();
+            sender.open(createSocket(connectUri));
+            String frame = "CONNECT\n" + "login: system\n" + "passcode: manager\n\n" + Stomp.NULL;
+            sender.sendFrame(frame);
+
+            frame = sender.receiveFrame();
+            assertTrue(frame.startsWith("CONNECTED"));
+
+            frame = "SEND\n" + "destination:/queue/" + getQueueName()  + "\n"  + "receipt: " + (receiptId++) + "\n\n" + "Hello World:" + (count++) + Stomp.NULL;
+            sender.sendFrame(frame);
+            frame = sender.receiveFrame();
+            assertTrue("" + frame, frame.startsWith("RECEIPT"));
+
+            sender.disconnect();
+
+            StompConnection receiver = new StompConnection();
+            receiver.open(createSocket(connectUri));
+
+            frame = "CONNECT\n" + "login: system\n" + "passcode: manager\n\n" + Stomp.NULL;
+            receiver.sendFrame(frame);
+
+            frame = receiver.receiveFrame();
+            assertTrue(frame.startsWith("CONNECTED"));
+
+            frame = "SUBSCRIBE\n" + "destination:/queue/" + getQueueName() + "\n"  + "receipt: " +  (receiptId++)  + "\n\n" + Stomp.NULL;
+            receiver.sendFrame(frame);
+
+            frame = receiver.receiveFrame();
+            assertTrue("" + frame, frame.startsWith("RECEIPT"));
+            assertTrue("Receipt contains receipt-id", frame.indexOf(Stomp.Headers.Response.RECEIPT_ID) >= 0);
+            frame = receiver.receiveFrame();
+            assertTrue("" + frame, frame.startsWith("MESSAGE"));
+
+            // remove suscription  so we don't hang about and get next message
+            frame = "UNSUBSCRIBE\n" + "destination:/queue/" + getQueueName() + "\n"  + "receipt: " +  (receiptId++)  + "\n\n" + Stomp.NULL;
+            receiver.sendFrame(frame);
+            frame = receiver.receiveFrame();
+            assertTrue("" + frame, frame.startsWith("RECEIPT"));
+
+            receiver.disconnect();
+        } while (count < done);
+
     }
 
     public void testSubscribeWithAutoAck() throws Exception {
@@ -1398,6 +1461,8 @@ public class StompTest extends CombinationTestSupport {
         stompConnection.ack(frame5, "tx3");
         stompConnection.commit("tx3");
 
+        waitForFrameToTakeEffect();
+
         stompDisconnect();
     }
 
@@ -1464,7 +1529,6 @@ public class StompTest extends CombinationTestSupport {
         TextMessage message = (TextMessage)consumer.receive(5000);
         assertNotNull(message);
         assertEquals("system", message.getStringProperty(Stomp.Headers.Message.USERID));
-
     }
 
     public void testJMSXUserIDIsSetInStompMessage() throws Exception {
@@ -1493,9 +1557,7 @@ public class StompTest extends CombinationTestSupport {
         headers.put(Stomp.Headers.Message.SUBSCRIPTION, "Thisisnotallowed");
         headers.put(Stomp.Headers.Message.USERID, "Thisisnotallowed");
 
-
         stompConnection.connect("system", "manager");
-
 
         stompConnection.send("/queue/" + getQueueName(), "msg", null, headers);
 
@@ -1511,7 +1573,6 @@ public class StompTest extends CombinationTestSupport {
         assertNull(mess_headers.get(Stomp.Headers.Message.REDELIVERED));
         assertNull(mess_headers.get(Stomp.Headers.Message.SUBSCRIPTION));
         assertEquals("system", mess_headers.get(Stomp.Headers.Message.USERID));
-
     }
 
     public void testExpire() throws Exception {
@@ -1528,6 +1589,21 @@ public class StompTest extends CombinationTestSupport {
         StompFrame stompMessage = stompConnection.receive(1000);
         assertNotNull(stompMessage);
         assertEquals(stompMessage.getHeaders().get(Stomp.Headers.Message.ORIGINAL_DESTINATION), "/queue/" + getQueueName());
+    }
+
+    public void testDefaultJMSReplyToDest() throws Exception {
+        stompConnection.connect("system", "manager");
+
+        HashMap<String, String> headers = new HashMap<String, String>();
+        headers.put(Stomp.Headers.Send.REPLY_TO, "JustAString");
+        headers.put(Stomp.Headers.Send.PERSISTENT, "true");
+
+        stompConnection.send("/queue/" + getQueueName(), "msg-with-reply-to", null, headers);
+
+        stompConnection.subscribe("/queue/" + getQueueName());
+        StompFrame stompMessage = stompConnection.receive(1000);
+        assertNotNull(stompMessage);
+        assertEquals(""  + stompMessage, stompMessage.getHeaders().get(Stomp.Headers.Send.REPLY_TO), "/queue/" + "JustAString");
     }
 
     public void testPersistent() throws Exception {
@@ -1559,30 +1635,28 @@ public class StompTest extends CombinationTestSupport {
         assertNotNull(stompMessage);
         assertNull(stompMessage.getHeaders().get(Stomp.Headers.Message.PERSISTENT));
     }
-    
+
     public void testReceiptNewQueue() throws Exception {
-    	
+
         String frame = "CONNECT\n" + "login: system\n" + "passcode: manager\n\n" + Stomp.NULL;
         stompConnection.sendFrame(frame);
 
         frame = stompConnection.receiveFrame();
         assertTrue(frame.startsWith("CONNECTED"));
-        
+
         frame = "SUBSCRIBE\n" + "destination:/queue/" + getQueueName() + 1234 + "\n" + "id:8fee4b8-4e5c9f66-4703-e936-3" + "\n" + "receipt:8fee4b8-4e5c9f66-4703-e936-2" + "\n\n" + Stomp.NULL;
         stompConnection.sendFrame(frame);
-        
+
         StompFrame receipt = stompConnection.receive();
         assertTrue(receipt.getAction().startsWith("RECEIPT"));
         assertEquals("8fee4b8-4e5c9f66-4703-e936-2", receipt.getHeaders().get("receipt-id"));
 
-
         frame = "SEND\n destination:/queue/" + getQueueName() + 123 + "\ncontent-length:0" + " \n\n" + Stomp.NULL;
         stompConnection.sendFrame(frame);
 
-
         frame = "SUBSCRIBE\n" + "destination:/queue/" + getQueueName() + 123 + "\n" + "id:8fee4b8-4e5c9f66-4703-e936-2" + "\n" + "receipt:8fee4b8-4e5c9f66-4703-e936-1" + "\n\n" + Stomp.NULL;
         stompConnection.sendFrame(frame);
-        
+
         receipt = stompConnection.receive();
         assertTrue(receipt.getAction().startsWith("RECEIPT"));
         assertEquals("8fee4b8-4e5c9f66-4703-e936-1", receipt.getHeaders().get("receipt-id"));
@@ -1598,11 +1672,244 @@ public class StompTest extends CombinationTestSupport {
         stompConnection.sendFrame(frame);
     }
 
+    public void testTransactedClientAckBrokerStats() throws Exception {
+        String frame = "CONNECT\n" + "login: system\n" + "passcode: manager\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        frame = stompConnection.receiveFrame();
+        assertTrue(frame.startsWith("CONNECTED"));
+
+        sendMessage(getName());
+        sendMessage(getName());
+
+        stompConnection.begin("tx1");
+
+        frame = "SUBSCRIBE\n" + "destination:/queue/" + getQueueName() + "\n" + "ack:client\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        StompFrame message = stompConnection.receive();
+        assertTrue(message.getAction().equals("MESSAGE"));
+        stompConnection.ack(message, "tx1");
+
+        message = stompConnection.receive();
+        assertTrue(message.getAction().equals("MESSAGE"));
+        stompConnection.ack(message, "tx1");
+
+        stompConnection.commit("tx1");
+
+        frame = "DISCONNECT\n" + "\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        waitForFrameToTakeEffect();
+
+        QueueViewMBean queueView = getProxyToQueue(getQueueName());
+        assertEquals(2, queueView.getDispatchCount());
+        assertEquals(2, queueView.getDequeueCount());
+        assertEquals(0, queueView.getQueueSize());
+    }
+
+    public void testReplyToDestinationNaming() throws Exception {
+
+        String frame = "CONNECT\n" + "login: system\n" + "passcode: manager\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        frame = stompConnection.receiveFrame();
+        assertTrue(frame.startsWith("CONNECTED"));
+
+        doTestActiveMQReplyToTempDestination("topic");
+        doTestActiveMQReplyToTempDestination("queue");
+    }
+
+    private void doTestActiveMQReplyToTempDestination(String type) throws Exception {
+        LOG.info("Starting test on Temp Destinations using a temporary: " + type);
+
+        final String dest = "/" + type + "/" + getQueueName();
+        final String tempDest = String.format("/temp-%s/2C26441740C0ECC9tt1", type);
+        LOG.info("Test is using out-bound topic: " + dest + ", and replyTo dest: " + tempDest);
+
+        // Subscribe both to the out-bound destination and the response tempt destination
+        stompConnection.subscribe(dest);
+        stompConnection.subscribe(tempDest);
+
+        // Send a Message with the ReplyTo value set.
+        HashMap<String, String> properties = new HashMap<String, String>();
+        properties.put(Stomp.Headers.Send.REPLY_TO, tempDest);
+        LOG.info(String.format("Sending request message: SEND with %s=%s", Stomp.Headers.Send.REPLY_TO, tempDest));
+        stompConnection.send(dest, "REQUEST", null, properties);
+
+        // The subscription should receive a response with the ReplyTo property set.
+        StompFrame received = stompConnection.receive();
+        assertNotNull(received);
+        String remoteReplyTo = received.getHeaders().get(Stomp.Headers.Send.REPLY_TO);
+        assertNotNull(remoteReplyTo);
+        assertTrue(remoteReplyTo.startsWith(String.format("/temp-%s/", type)));
+        LOG.info(String.format("Received request message: %s with %s=%s", received.getAction(), Stomp.Headers.Send.REPLY_TO, remoteReplyTo));
+
+        // Reply to the request using the given ReplyTo destination
+        stompConnection.send(remoteReplyTo, "RESPONSE");
+
+        // The response should be received by the Temporary Destination subscription
+        StompFrame reply = stompConnection.receive();
+        assertNotNull(reply);
+        assertEquals("MESSAGE", reply.getAction());
+        LOG.info(String.format("Response %s received", reply.getAction()));
+
+        BrokerViewMBean broker = getProxyToBroker();
+        if (type.equals("topic")) {
+            assertEquals(1, broker.getTemporaryTopics().length);
+        } else {
+            assertEquals(1, broker.getTemporaryQueues().length);
+        }
+    }
+
+    public void testReplyToAcrossConnections() throws Exception {
+
+        String frame = "CONNECT\n" + "login: system\n" + "passcode: manager\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        frame = stompConnection.receiveFrame();
+        assertTrue(frame.startsWith("CONNECTED"));
+
+        doReplyToAcrossConnections("topic");
+        doReplyToAcrossConnections("queue");
+    }
+
+    private void doReplyToAcrossConnections(String type) throws Exception {
+        LOG.info("Starting test on Temp Destinations using a temporary: " + type);
+
+        StompConnection responder = new StompConnection();
+        stompConnect(responder);
+        String frame = "CONNECT\n" + "login: system\n" + "passcode: manager\n\n" + Stomp.NULL;
+        responder.sendFrame(frame);
+
+        frame = responder.receiveFrame();
+        assertTrue(frame.startsWith("CONNECTED"));
+
+        final String dest = "/" + type + "/" + getQueueName();
+        final String tempDest = String.format("/temp-%s/2C26441740C0ECC9tt1:1:0:1", type);
+        LOG.info("Test is using out-bound topic: " + dest + ", and replyTo dest: " + tempDest);
+
+        // Subscribe to the temp destination, this is where we get our response.
+        stompConnection.subscribe(tempDest);
+
+        // Subscribe to the Queue, this is where we get our request.
+        responder.subscribe(dest);
+
+        // Send a Message with the ReplyTo value set.
+        HashMap<String, String> properties = new HashMap<String, String>();
+        properties.put(Stomp.Headers.Send.REPLY_TO, tempDest);
+        LOG.info(String.format("Sending request message: SEND with %s=%s", Stomp.Headers.Send.REPLY_TO, tempDest));
+        stompConnection.send(dest, "REQUEST", null, properties);
+
+        // The subscription should receive a response with the ReplyTo property set.
+        StompFrame received = responder.receive();
+        assertNotNull(received);
+        String remoteReplyTo = received.getHeaders().get(Stomp.Headers.Send.REPLY_TO);
+        assertNotNull(remoteReplyTo);
+        assertTrue(remoteReplyTo.startsWith(String.format("/remote-temp-%s/", type)));
+        LOG.info(String.format("Received request message: %s with %s=%s", received.getAction(), Stomp.Headers.Send.REPLY_TO, remoteReplyTo));
+
+        // Reply to the request using the given ReplyTo destination
+        responder.send(remoteReplyTo, "RESPONSE");
+
+        // The response should be received by the Temporary Destination subscription
+        StompFrame reply = stompConnection.receive();
+        assertNotNull(reply);
+        assertEquals("MESSAGE", reply.getAction());
+        assertTrue(reply.getBody().contains("RESPONSE"));
+        LOG.info(String.format("Response %s received", reply.getAction()));
+
+        BrokerViewMBean broker = getProxyToBroker();
+        if (type.equals("topic")) {
+            assertEquals(1, broker.getTemporaryTopics().length);
+        } else {
+            assertEquals(1, broker.getTemporaryQueues().length);
+        }
+    }
+
+    private BrokerViewMBean getProxyToBroker() throws MalformedObjectNameException, JMSException {
+        ObjectName brokerViewMBean = new ObjectName(
+            "org.apache.activemq:Type=Broker,BrokerName=localhost");
+        BrokerViewMBean proxy = (BrokerViewMBean) broker.getManagementContext()
+                .newProxyInstance(brokerViewMBean, BrokerViewMBean.class, true);
+        return proxy;
+    }
+
+    private QueueViewMBean getProxyToQueue(String name) throws MalformedObjectNameException, JMSException {
+        ObjectName queueViewMBeanName = new ObjectName("org.apache.activemq"
+                + ":Type=Queue,Destination=" + name
+                + ",BrokerName=localhost");
+        QueueViewMBean proxy = (QueueViewMBean) broker.getManagementContext()
+                .newProxyInstance(queueViewMBeanName, QueueViewMBean.class, true);
+        return proxy;
+    }
+
     protected void assertClients(int expected) throws Exception {
         org.apache.activemq.broker.Connection[] clients = broker.getBroker().getClients();
         int actual = clients.length;
 
         assertEquals("Number of clients", expected, actual);
+    }
+
+    public void testDisconnectDoesNotDeadlockBroker() throws Exception {
+        for (int i = 0; i < 20; ++i) {
+            doTestConnectionLeak();
+        }
+    }
+
+    private void doTestConnectionLeak() throws Exception {
+        stompConnect();
+
+        String frame = "CONNECT\n" + "login: system\n" + "passcode: manager\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        frame = stompConnection.receiveFrame();
+        assertTrue(frame.startsWith("CONNECTED"));
+
+        boolean gotMessage = false;
+        boolean gotReceipt = false;
+
+        char[] payload = new char[1024];
+        Arrays.fill(payload, 'A');
+
+        String test = "SEND\n" +
+                "x-type:DEV-3485\n"  +
+                "x-uuid:" + UUID.randomUUID() + "\n"  +
+                "persistent:true\n"  +
+                "receipt:" + UUID.randomUUID() + "\n" +
+                "destination:/queue/test.DEV-3485" +
+                "\n\n" +
+                new String(payload) + Stomp.NULL;
+
+        frame = "SUBSCRIBE\n" + "destination:/queue/test.DEV-3485\n" + "ack:auto\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        waitForFrameToTakeEffect();
+
+        stompConnection.sendFrame(test);
+
+        // We only want one of them, to trigger the shutdown and potentially
+        // see a deadlock.
+        while (!gotMessage && !gotReceipt) {
+            frame = stompConnection.receiveFrame();
+
+            LOG.debug("Received the frame: " + frame);
+
+            if (frame.startsWith("RECEIPT")) {
+                gotReceipt = true;
+            } else if(frame.startsWith("MESSAGE")) {
+                gotMessage = true;
+            } else {
+                fail("Received a frame that we were not expecting.");
+            }
+        }
+
+        frame = "DISCONNECT\n" + "\n\n" + Stomp.NULL;
+        stompConnection.sendFrame(frame);
+
+        waitForFrameToTakeEffect();
+
+        stompConnection.close();
     }
 
     protected void waitForFrameToTakeEffect() throws InterruptedException {

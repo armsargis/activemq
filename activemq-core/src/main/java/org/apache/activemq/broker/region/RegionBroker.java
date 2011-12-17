@@ -30,7 +30,6 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import javax.jms.InvalidClientIDException;
 import javax.jms.JMSException;
-import org.apache.activemq.advisory.AdvisorySupport;
 import org.apache.activemq.broker.Broker;
 import org.apache.activemq.broker.BrokerService;
 import org.apache.activemq.broker.Connection;
@@ -38,6 +37,7 @@ import org.apache.activemq.broker.ConnectionContext;
 import org.apache.activemq.broker.ConsumerBrokerExchange;
 import org.apache.activemq.broker.EmptyBroker;
 import org.apache.activemq.broker.ProducerBrokerExchange;
+import org.apache.activemq.broker.TransportConnection;
 import org.apache.activemq.broker.TransportConnector;
 import org.apache.activemq.broker.region.policy.DeadLetterStrategy;
 import org.apache.activemq.broker.region.policy.PolicyMap;
@@ -133,7 +133,7 @@ public class RegionBroker extends EmptyBroker {
 
     @Override
     public Map<ActiveMQDestination, Destination> getDestinationMap() {
-        Map<ActiveMQDestination, Destination> answer = getQueueRegion().getDestinationMap();
+        Map<ActiveMQDestination, Destination> answer = new HashMap<ActiveMQDestination, Destination>(getQueueRegion().getDestinationMap());
         answer.putAll(getTopicRegion().getDestinationMap());
         return answer;
     }
@@ -326,11 +326,9 @@ public class RegionBroker extends EmptyBroker {
             switch (destination.getDestinationType()) {
             case ActiveMQDestination.QUEUE_TYPE:
                 queueRegion.removeDestination(context, destination, timeout);
-                removeAdvisoryTopics("Queue.", context, destination, timeout);
                 break;
             case ActiveMQDestination.TOPIC_TYPE:
                 topicRegion.removeDestination(context, destination, timeout);
-                removeAdvisoryTopics("Topic.", context, destination, timeout);
                 break;
             case ActiveMQDestination.TEMP_QUEUE_TYPE:
                 tempQueueRegion.removeDestination(context, destination, timeout);
@@ -345,25 +343,6 @@ public class RegionBroker extends EmptyBroker {
 
         }
 
-    }
-
-    public void removeAdvisoryTopics(String destinationType, ConnectionContext context, ActiveMQDestination destination, long timeout) throws Exception {
-        if (this.brokerService.isAdvisorySupport()) {
-            String producerAdvisoryTopic = AdvisorySupport.PRODUCER_ADVISORY_TOPIC_PREFIX + destinationType + destination.getPhysicalName();
-            String consumerAdvisoryTopic = AdvisorySupport.CONSUMER_ADVISORY_TOPIC_PREFIX + destinationType + destination.getPhysicalName();
-
-            ActiveMQDestination dests[] = getDestinations();
-            for (ActiveMQDestination dest: dests) {
-                String name = dest.getPhysicalName();
-                if ( name.equals(producerAdvisoryTopic) || name.equals(consumerAdvisoryTopic) ) {
-                    try {
-                        removeDestination(context, dest, timeout);
-                    } catch (JMSException ignore) {
-                        // at least ignore the Unknown Destination Type JMSException
-                    }
-                }
-            }
-        }
     }
 
     @Override
@@ -395,9 +374,22 @@ public class RegionBroker extends EmptyBroker {
         if (destination != null) {
             inactiveDestinationsPurgeLock.readLock().lock();
             try {
-                // This seems to cause the destination to be added but without
-                // advisories firing...
-                context.getBroker().addDestination(context, destination, true);
+                if (!destinations.containsKey(destination)) {
+                    // This seems to cause the destination to be added but without
+                    // advisories firing...
+                    context.getBroker().addDestination(context, destination, true);
+                    // associate it with the connection so that it can get deleted
+                    if (destination.isTemporary() && context.getConnectionState() != null) {
+                        DestinationInfo destinationInfo = new DestinationInfo(context.getConnectionId(),
+                                DestinationInfo.ADD_OPERATION_TYPE,
+                                destination);
+                        context.getConnectionState().addTempDestination(destinationInfo);
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug("assigning ownership of auto created temp : " + destination + " to connection:"
+                                    + context.getConnectionId());
+                        }
+                    }
+                }
                 switch (destination.getDestinationType()) {
                 case ActiveMQDestination.QUEUE_TYPE:
                     queueRegion.addProducer(context, info);
@@ -514,7 +506,6 @@ public class RegionBroker extends EmptyBroker {
     public void send(ProducerBrokerExchange producerExchange, Message message) throws Exception {
         message.setBrokerInTime(System.currentTimeMillis());
         if (producerExchange.isMutable() || producerExchange.getRegion() == null
-                || (producerExchange.getRegion() != null && producerExchange.getRegion().getDestinationMap().get(message.getDestination()) == null)
                 || (producerExchange.getRegionDestination() != null && producerExchange.getRegionDestination().isDisposed())) {
             ActiveMQDestination destination = message.getDestination();
             // ensure the destination is registered with the RegionBroker

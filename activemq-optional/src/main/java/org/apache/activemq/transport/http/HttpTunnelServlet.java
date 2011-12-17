@@ -19,14 +19,16 @@ package org.apache.activemq.transport.http;
 import java.io.BufferedReader;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.util.HashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.GZIPInputStream;
+
 import javax.servlet.ServletException;
-import javax.servlet.ServletInputStream;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -46,8 +48,6 @@ import org.slf4j.LoggerFactory;
  * A servlet which handles server side HTTP transport, delegating to the
  * ActiveMQ broker. This servlet is designed for being embedded inside an
  * ActiveMQ Broker using an embedded Jetty or Tomcat instance.
- *
- *
  */
 public class HttpTunnelServlet extends HttpServlet {
     private static final long serialVersionUID = -3826714430767484333L;
@@ -58,8 +58,9 @@ public class HttpTunnelServlet extends HttpServlet {
     private TextWireFormat wireFormat;
     private ConcurrentMap<String, BlockingQueueTransport> clients = new ConcurrentHashMap<String, BlockingQueueTransport>();
     private final long requestTimeout = 30000L;
-    private HashMap transportOptions;
+    private HashMap<String, Object> transportOptions;
 
+    @SuppressWarnings("unchecked")
     @Override
     public void init() throws ServletException {
         super.init();
@@ -71,11 +72,17 @@ public class HttpTunnelServlet extends HttpServlet {
         if (transportFactory == null) {
             throw new ServletException("No such attribute 'transportFactory' available in the ServletContext");
         }
-        transportOptions = (HashMap)getServletContext().getAttribute("transportOptions");
+        transportOptions = (HashMap<String, Object>)getServletContext().getAttribute("transportOptions");
         wireFormat = (TextWireFormat)getServletContext().getAttribute("wireFormat");
         if (wireFormat == null) {
             wireFormat = createWireFormat();
         }
+    }
+
+    @Override
+    protected void doOptions(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
+        response.addHeader("Accepts-Encoding", "gzip");
+        super.doOptions(request, response);
     }
 
     @Override
@@ -97,27 +104,27 @@ public class HttpTunnelServlet extends HttpServlet {
             packet = (Command)transportChannel.getQueue().poll(requestTimeout, TimeUnit.MILLISECONDS);
 
             DataOutputStream stream = new DataOutputStream(response.getOutputStream());
-            // while( packet !=null ) {
             wireFormat.marshal(packet, stream);
             count++;
-            // packet = (Command) transportChannel.getQueue().poll(0,
-            // TimeUnit.MILLISECONDS);
-            // }
-
         } catch (InterruptedException ignore) {
         }
+
         if (count == 0) {
             response.setStatus(HttpServletResponse.SC_REQUEST_TIMEOUT);
         }
     }
 
     @Override
-    protected void doPost(HttpServletRequest request, HttpServletResponse response) throws ServletException,
-            IOException {
+    protected void doPost(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
+
+        InputStream stream = request.getInputStream();
+        String contentType = request.getContentType();
+        if (contentType != null && contentType.equals("application/x-gzip")) {
+            stream = new GZIPInputStream(stream);
+        }
 
         // Read the command directly from the reader, assuming UTF8 encoding
-        ServletInputStream sis = request.getInputStream();
-        Command command = (Command) wireFormat.unmarshalText(new InputStreamReader(sis, "UTF-8"));
+        Command command = (Command) wireFormat.unmarshalText(new InputStreamReader(stream, "UTF-8"));
 
         if (command instanceof WireFormatInfo) {
             WireFormatInfo info = (WireFormatInfo) command;
@@ -138,7 +145,6 @@ public class HttpTunnelServlet extends HttpServlet {
     }
 
     private boolean canProcessWireFormatVersion(int version) {
-        // TODO:
         return true;
     }
 
@@ -210,7 +216,7 @@ public class HttpTunnelServlet extends HttpServlet {
         Transport transport = answer;
         try {
             // Preserve the transportOptions for future use by making a copy before applying (they are removed when applied).
-            HashMap options = new HashMap(transportOptions);
+            HashMap<String, Object> options = new HashMap<String, Object>(transportOptions);
             transport = transportFactory.serverConfigure(answer, null, options);
         } catch (Exception e) {
             throw IOExceptionSupport.create(e);

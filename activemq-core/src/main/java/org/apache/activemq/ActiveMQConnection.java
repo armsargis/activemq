@@ -107,7 +107,6 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
     public static final String DEFAULT_BROKER_URL = ActiveMQConnectionFactory.DEFAULT_BROKER_URL;
 
     private static final Logger LOG = LoggerFactory.getLogger(ActiveMQConnection.class);
-    private static final IdGenerator CONNECTION_ID_GENERATOR = new IdGenerator();
 
     public final ConcurrentHashMap<ActiveMQTempDestination, ActiveMQTempDestination> activeTempDestinations = new ConcurrentHashMap<ActiveMQTempDestination, ActiveMQTempDestination>();
 
@@ -192,7 +191,9 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
     protected volatile CountDownLatch transportInterruptionProcessingComplete;
     private long consumerFailoverRedeliveryWaitPeriod;
     private final Scheduler scheduler;
-    private boolean messagePrioritySupported=true;
+    private boolean messagePrioritySupported = true;
+    private boolean transactedIndividualAck = false;
+    private boolean nonBlockingRedelivery = false;
 
     /**
      * Construct an <code>ActiveMQConnection</code>
@@ -598,7 +599,12 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
      *                 cause this exception to be thrown.
      */
     public void close() throws JMSException {
+        // Store the interrupted state and clear so that cleanup happens without
+        // leaking connection resources.  Reset in finally to preserve state.
+        boolean interrupted = Thread.interrupted();
+
         try {
+
             // If we were running, lets stop first.
             if (!closed.get() && !transportFailed.get()) {
                 stop();
@@ -662,8 +668,6 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
                         doAsyncSendPacket(new ShutdownInfo());
                     }
 
-                    ServiceSupport.dispose(this.transport);
-
                     started.set(false);
 
                     // TODO if we move the TaskRunnerFactory to the connection
@@ -679,13 +683,19 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
             }
         } finally {
             try {
-                if (executor != null){
+                if (executor != null) {
                     executor.shutdown();
                 }
-            }catch(Throwable e) {
-                LOG.error("Error shutting down thread pool " + e,e);
+            } catch (Throwable e) {
+                LOG.error("Error shutting down thread pool " + e, e);
             }
+
+            ServiceSupport.dispose(this.transport);
+
             factoryStats.removeConnection(this);
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -1293,11 +1303,18 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
                         }
                         JMSException jmsEx = null;
                         try {
-                         jmsEx = JMSExceptionSupport.create(er.getException());
-                        }catch(Throwable e) {
+                            jmsEx = JMSExceptionSupport.create(er.getException());
+                        } catch(Throwable e) {
                             LOG.error("Caught an exception trying to create a JMSException for " +er.getException(),e);
                         }
-                        if(jmsEx !=null) {
+                        //dispose of transport for security exceptions
+                        if (er.getException() instanceof SecurityException){
+                            Transport t = this.transport;
+                            if (null != t){
+                                ServiceSupport.dispose(t);
+                            }
+                        }
+                        if (jmsEx !=null) {
                             throw jmsEx;
                         }
                     }
@@ -1505,6 +1522,13 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
         started.set(false);
     }
 
+    public void finalize() throws Throwable{
+        Scheduler s = this.scheduler;
+        if (s != null){
+            s.stop();
+        }
+    }
+
     /**
      * Changes the associated username/password that is associated with this
      * connection. If the connection has been used, you must called cleanup()
@@ -1625,7 +1649,7 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
      * The max time in milliseconds between optimized ack batches
      * @param optimizeAcknowledgeTimeOut
      */
-    public void setOptimizeAcknowledgeTimeOut(int optimizeAcknowledgeTimeOut) {
+    public void setOptimizeAcknowledgeTimeOut(long optimizeAcknowledgeTimeOut) {
         this.optimizeAcknowledgeTimeOut =  optimizeAcknowledgeTimeOut;
     }
 
@@ -2219,9 +2243,16 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
     protected void onControlCommand(ControlCommand command) {
         String text = command.getCommand();
         if (text != null) {
-            if (text.equals("shutdown")) {
+            if ("shutdown".equals(text)) {
                 LOG.info("JVM told to shutdown");
                 System.exit(0);
+            }
+            if (false && "close".equals(text)){
+                LOG.error("Broker " + getBrokerInfo() + "shutdown connection");
+                try {
+                    close();
+                } catch (JMSException e) {
+                }
             }
         }
     }
@@ -2399,6 +2430,23 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
         this.checkForDuplicates = checkForDuplicates;
     }
 
+
+    public boolean isTransactedIndividualAck() {
+        return transactedIndividualAck;
+    }
+
+    public void setTransactedIndividualAck(boolean transactedIndividualAck) {
+        this.transactedIndividualAck = transactedIndividualAck;
+    }
+
+    public boolean isNonBlockingRedelivery() {
+        return nonBlockingRedelivery;
+    }
+
+    public void setNonBlockingRedelivery(boolean nonBlockingRedelivery) {
+        this.nonBlockingRedelivery = nonBlockingRedelivery;
+    }
+
     /**
      * Removes any TempDestinations that this connection has cached, ignoring
      * any exceptions generated because the destination is in use as they should
@@ -2415,12 +2463,17 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
         while(entries.hasNext()) {
             ConcurrentHashMap.Entry<ActiveMQTempDestination, ActiveMQTempDestination> entry = entries.next();
             try {
-                this.deleteTempDestination(entry.getValue());
+                // Only delete this temp destination if it was created from this connection. The connection used
+                // for the advisory consumer may also have a reference to this temp destination.
+                ActiveMQTempDestination dest = entry.getValue();
+                String thisConnectionId = (info.getConnectionId() == null) ? "" : info.getConnectionId().toString();
+                if (dest.getConnectionId() != null && dest.getConnectionId().equals(thisConnectionId)) {
+                    this.deleteTempDestination(entry.getValue());
+                }
             } catch (Exception ex) {
                 // the temp dest is in use so it can not be deleted.
                 // it is ok to leave it to connection tear down phase
             }
         }
     }
-
 }

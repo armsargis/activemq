@@ -17,19 +17,27 @@
 package org.apache.activemq.network;
 
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.Vector;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import javax.jms.Connection;
 import javax.jms.ConnectionFactory;
 import javax.jms.JMSException;
+import javax.jms.Message;
 import javax.jms.MessageConsumer;
 import javax.jms.Session;
+import javax.management.ObjectName;
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.TrustManager;
 
@@ -38,8 +46,10 @@ import org.apache.activemq.broker.BrokerService;
 import org.apache.activemq.broker.SslContext;
 import org.apache.activemq.broker.TransportConnector;
 import org.apache.activemq.command.ActiveMQDestination;
+import org.apache.activemq.store.kahadb.KahaDBPersistenceAdapter;
 import org.apache.activemq.transport.tcp.SslBrokerServiceTest;
 import org.apache.activemq.util.IntrospectionSupport;
+import org.apache.activemq.util.JMXSupport;
 import org.apache.activemq.util.Wait;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -66,12 +76,16 @@ public class FailoverStaticNetworkTest {
     protected BrokerService createBroker(String scheme, String listenPort, String[] networkToPorts,
                                          HashMap<String, String> networkProps) throws Exception {
         BrokerService broker = new BrokerService();
-        broker.setUseJmx(false);
         broker.getManagementContext().setCreateConnector(false);
         broker.setSslContext(sslContext);
         broker.setDeleteAllMessagesOnStartup(true);
         broker.setBrokerName("Broker_" + listenPort);
-        broker.addConnector(scheme + "://localhost:" + listenPort);
+        // lazy init listener on broker start
+        TransportConnector transportConnector = new TransportConnector();
+        transportConnector.setUri(new URI(scheme + "://localhost:" + listenPort));
+        List<TransportConnector> transportConnectors = new ArrayList<TransportConnector>();
+        transportConnectors.add(transportConnector);
+        broker.setTransportConnectors(transportConnectors);
         if (networkToPorts != null && networkToPorts.length > 0) {
             StringBuilder builder = new StringBuilder("static:(failover:(" + scheme + "://localhost:");
             builder.append(networkToPorts[0]);
@@ -80,7 +94,7 @@ public class FailoverStaticNetworkTest {
             }
             // limit the reconnects in case of initial random connection to slave
             // leaving randomize on verifies that this config is picked up
-            builder.append(")?maxReconnectAttempts=1)");
+            builder.append(")?maxReconnectAttempts=0)?useExponentialBackOff=false");
             NetworkConnector nc = broker.addNetworkConnector(builder.toString());
             if (networkProps != null) {
                 IntrospectionSupport.setProperties(nc, networkProps);
@@ -155,6 +169,10 @@ public class FailoverStaticNetworkTest {
         brokerB.start();
         doTestNetworkSendReceive();
 
+        // check mbean
+        Set<String> bridgeNames = getNetworkBridgeMBeanName(brokerB);
+        assertEquals("only one bridgeName: " + bridgeNames, 1, bridgeNames.size());
+
         LOG.info("stopping brokerA");
         brokerA.stop();
         brokerA.waitUntilStopped();
@@ -164,6 +182,21 @@ public class FailoverStaticNetworkTest {
         brokerA.start();
 
         doTestNetworkSendReceive();
+
+        Set<String> otherBridgeNames = getNetworkBridgeMBeanName(brokerB);
+        assertEquals("only one bridgeName: " + otherBridgeNames, 1, otherBridgeNames.size());
+
+        assertTrue("there was an addition", bridgeNames.addAll(otherBridgeNames));
+    }
+
+    private Set<String> getNetworkBridgeMBeanName(BrokerService brokerB) throws Exception {
+        Set<String> names = new HashSet<String>();
+        for (ObjectName objectName : brokerB.getManagementContext().queryNames(null, null)) {
+            if ("NetworkBridge".equals(objectName.getKeyProperty("Type"))) {
+                names.add(objectName.getKeyProperty("Name"));
+            }
+        }
+        return names;
     }
 
     @Test
@@ -245,7 +278,6 @@ public class FailoverStaticNetworkTest {
         brokerC.start();
         assertTrue("all props applied a second time", networkConnectorProps.isEmpty());
 
-        //Thread.sleep(4000);
         doTestNetworkSendReceive(brokerC, brokerB);
         doTestNetworkSendReceive(brokerB, brokerC);
 
@@ -286,11 +318,101 @@ public class FailoverStaticNetworkTest {
         doTestNetworkSendReceive();
     }
 
+    @Test
+    public void testRepeatedSendReceiveWithMasterSlaveAlternate() throws Exception {
+        doTestRepeatedSendReceiveWithMasterSlaveAlternate(null);
+    }
+
+    @Test
+    public void testRepeatedSendReceiveWithMasterSlaveAlternateDuplex() throws Exception {
+        HashMap<String, String> networkConnectorProps = new HashMap<String, String>();
+        networkConnectorProps.put("duplex", "true");
+
+        doTestRepeatedSendReceiveWithMasterSlaveAlternate(networkConnectorProps);
+    }
+
+    public void doTestRepeatedSendReceiveWithMasterSlaveAlternate(HashMap<String, String> networkConnectorProps) throws Exception {
+
+        brokerB = createBroker("tcp", "62617", new String[]{"61610","61611"}, networkConnectorProps);
+        brokerB.start();
+
+        final AtomicBoolean done = new AtomicBoolean(false);
+        ExecutorService executorService = Executors.newCachedThreadPool();
+        executorService.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    while (!done.get()) {
+                        brokerA = createBroker("tcp", "61610", null);
+                        brokerA.setBrokerName("Pair");
+                        brokerA.setBrokerObjectName(new ObjectName(brokerA.getManagementContext().getJmxDomainName() + ":" + "BrokerName="
+                                + JMXSupport.encodeObjectNamePart("A") + "," + "Type=Broker"));
+                        ((KahaDBPersistenceAdapter)brokerA.getPersistenceAdapter()).setDatabaseLockedWaitDelay(1000);
+                        brokerA.start();
+                        brokerA.waitUntilStopped();
+
+                        // restart after peer taken over
+                        brokerA1.waitUntilStarted();
+                    }
+                } catch (Exception ignored) {
+                    LOG.info("A create/start, unexpected: " + ignored, ignored);
+                }
+            }
+        });
+
+        // start with brokerA as master
+        Wait.waitFor(new Wait.Condition() {
+            @Override
+            public boolean isSatisified() throws Exception {
+                return brokerA != null && brokerA.waitUntilStarted();
+            }
+        });
+
+        executorService.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    while (!done.get()) {
+                        brokerA1 = createBroker("tcp", "61611", null);
+                        brokerA1.setBrokerName("Pair");
+                        // so they can coexist in local jmx we set the object name b/c the brokername identifies the shared store
+                        brokerA1.setBrokerObjectName(new ObjectName(brokerA.getManagementContext().getJmxDomainName() + ":" + "BrokerName="
+                            + JMXSupport.encodeObjectNamePart("A1") + "," + "Type=Broker"));
+                        ((KahaDBPersistenceAdapter)brokerA1.getPersistenceAdapter()).setDatabaseLockedWaitDelay(1000);
+                        brokerA1.start();
+                        brokerA1.waitUntilStopped();
+
+                        // restart after peer taken over
+                        brokerA.waitUntilStarted();
+                    }
+                } catch (Exception ignored) {
+                    LOG.info("A1 create/start, unexpected: " + ignored, ignored);
+                }
+            }
+        });
+
+        for (int i=0; i<4; i++) {
+            BrokerService currentMaster =  (i%2 == 0 ? brokerA : brokerA1);
+            LOG.info("iteration: " + i + ", using: " + currentMaster.getBrokerObjectName().getKeyProperty("BrokerName"));
+            currentMaster.waitUntilStarted();
+
+            doTestNetworkSendReceive(brokerB, currentMaster);
+
+            LOG.info("Stopping " + currentMaster.getBrokerObjectName().getKeyProperty("BrokerName"));
+            currentMaster.stop();
+            currentMaster.waitUntilStopped();
+        }
+
+        done.set(true);
+        LOG.info("all done");
+        executorService.shutdownNow();
+    }
+
     private void doTestNetworkSendReceive() throws Exception, JMSException {
         doTestNetworkSendReceive(brokerB, brokerA);
     }
 
-    private void doTestNetworkSendReceive(BrokerService to, BrokerService from) throws Exception, JMSException {
+    private void doTestNetworkSendReceive(final BrokerService to, final BrokerService from) throws Exception, JMSException {
 
         LOG.info("Creating Consumer on the networked broker ..." + from);
         
@@ -309,7 +431,9 @@ public class FailoverStaticNetworkTest {
         
         boolean gotMessage = Wait.waitFor(new Wait.Condition() {
             public boolean isSatisified() throws Exception {
-                return consumer.receive(1000) != null;
+                Message message = consumer.receive(5000);
+                LOG.info("from:  " + from.getBrokerObjectName().getKeyProperty("BrokerName") +  ", received: " + message);
+                return message != null;
             }      
         });
         try {

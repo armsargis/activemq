@@ -16,28 +16,23 @@
  */
 package org.apache.activemq.network;
 
-import java.net.URI;
-import javax.jms.Connection;
-import javax.jms.DeliveryMode;
-import javax.jms.Destination;
-import javax.jms.JMSException;
-import javax.jms.Message;
-import javax.jms.MessageConsumer;
-import javax.jms.MessageListener;
-import javax.jms.MessageProducer;
-import javax.jms.Session;
-import javax.jms.TextMessage;
-import javax.jms.TopicRequestor;
-import javax.jms.TopicSession;
 import org.apache.activemq.ActiveMQConnectionFactory;
 import org.apache.activemq.broker.BrokerService;
+import org.apache.activemq.command.ActiveMQDestination;
 import org.apache.activemq.command.ActiveMQTopic;
+import org.apache.activemq.command.ConsumerId;
+import org.apache.activemq.util.Wait;
 import org.apache.activemq.xbean.BrokerFactoryBean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.support.AbstractApplicationContext;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
+
+import javax.jms.*;
+import java.net.URI;
+import java.util.Arrays;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class SimpleNetworkTest extends org.apache.activemq.TestSupport {
 
@@ -69,7 +64,6 @@ public class SimpleNetworkTest extends org.apache.activemq.TestSupport {
                     textMsg.setText(payload);
                     remoteProducer.send(replyTo, textMsg);
                 } catch (JMSException e) {
-                    // TODO Auto-generated catch block
                     e.printStackTrace();
                 }
             }
@@ -87,7 +81,6 @@ public class SimpleNetworkTest extends org.apache.activemq.TestSupport {
     }
 
     public void testFiltering() throws Exception {
-
         MessageConsumer includedConsumer = remoteSession.createConsumer(included);
         MessageConsumer excludedConsumer = remoteSession.createConsumer(excluded);
         MessageProducer includedProducer = localSession.createProducer(included);
@@ -106,7 +99,9 @@ public class SimpleNetworkTest extends org.apache.activemq.TestSupport {
         MessageConsumer consumer2 = remoteSession.createConsumer(included);
         MessageProducer producer = localSession.createProducer(included);
         producer.setDeliveryMode(DeliveryMode.NON_PERSISTENT);
-        Thread.sleep(2000);
+
+        waitForConsumerRegistration(localBroker, 2, included);
+
         for (int i = 0; i < MESSAGE_COUNT; i++) {
             Message test = localSession.createTextMessage("test-" + i);
             producer.send(test);
@@ -116,6 +111,30 @@ public class SimpleNetworkTest extends org.apache.activemq.TestSupport {
         // ensure no more messages received
         assertNull(consumer1.receive(1000));
         assertNull(consumer2.receive(1000));
+    }
+
+    private void waitForConsumerRegistration(final BrokerService brokerService, final int min, final ActiveMQDestination destination) throws Exception {
+        assertTrue("Internal bridge consumers registered in time", Wait.waitFor(new Wait.Condition() {
+            @Override
+            public boolean isSatisified() throws Exception {
+                Object[] bridges = brokerService.getNetworkConnectors().get(0).bridges.values().toArray();
+                if (bridges.length > 0) {
+                    LOG.info(brokerService + " bridges "  + Arrays.toString(bridges));
+                    DemandForwardingBridgeSupport demandForwardingBridgeSupport = (DemandForwardingBridgeSupport) bridges[0];
+                    ConcurrentHashMap<ConsumerId, DemandSubscription> forwardingBridges = demandForwardingBridgeSupport.getLocalSubscriptionMap();
+                    LOG.info(brokerService + " bridge "  + demandForwardingBridgeSupport + ", localSubs: " + forwardingBridges);
+                    if (!forwardingBridges.isEmpty()) {
+                        for (DemandSubscription demandSubscription : forwardingBridges.values()) {
+                            if (demandSubscription.getLocalInfo().getDestination().equals(destination)) {
+                                LOG.info(brokerService + " DemandSubscription "  + demandSubscription + ", size: " + demandSubscription.size());
+                                return demandSubscription.size() >= min;
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
+        }));
     }
 
     public void testDurableStoreAndForward() throws Exception {
@@ -168,8 +187,8 @@ public class SimpleNetworkTest extends org.apache.activemq.TestSupport {
         for (int i = 0; i < MESSAGE_COUNT / 2; i++) {
             assertNotNull("message count: " + i, remoteConsumer.receive(2500));
         }
-    }    
-    
+    }
+
     @Override
     protected void setUp() throws Exception {
         setAutoFail(true);
@@ -195,8 +214,10 @@ public class SimpleNetworkTest extends org.apache.activemq.TestSupport {
     protected void doSetUp() throws Exception {
         remoteBroker = createRemoteBroker();
         remoteBroker.start();
+        remoteBroker.waitUntilStarted();
         localBroker = createLocalBroker();
         localBroker.start();
+        localBroker.waitUntilStarted();
         URI localURI = localBroker.getVmConnectorURI();
         ActiveMQConnectionFactory fac = new ActiveMQConnectionFactory(localURI);
         fac.setAlwaysSyncSend(true);

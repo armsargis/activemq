@@ -19,6 +19,7 @@ package org.apache.activemq.transport.failover;
 import java.io.IOException;
 import java.net.*;
 import java.util.*;
+import java.util.concurrent.CountDownLatch;
 
 import javax.jms.Connection;
 import javax.net.ServerSocketFactory;
@@ -26,61 +27,72 @@ import javax.net.ServerSocketFactory;
 import junit.framework.TestCase;
 
 import org.apache.activemq.ActiveMQConnectionFactory;
+import org.apache.activemq.util.Wait;
 
 public class SlowConnectionTest extends TestCase {
-        
+
+    private CountDownLatch socketReadyLatch = new CountDownLatch(1);
+
     public void testSlowConnection() throws Exception {
-        
-        int timeout = 1000;
-        URI tcpUri = new URI("tcp://localhost:61616?soTimeout=" + timeout + "&trace=true&connectionTimeout=" + timeout + "&wireFormat.maxInactivityDurationInitalDelay=" + timeout);
-        
-        ActiveMQConnectionFactory cf = new ActiveMQConnectionFactory("failover:(" + tcpUri + ")");
-        final Connection connection = cf.createConnection();
-        
+
         MockBroker broker = new MockBroker();
         broker.start();
-        
+
+        socketReadyLatch.await();
+        int timeout = 1000;
+        URI tcpUri = new URI("tcp://localhost:" + broker.ss.getLocalPort() + "?soTimeout=" + timeout + "&trace=true&connectionTimeout=" + timeout + "&wireFormat.maxInactivityDurationInitalDelay=" + timeout);
+
+        ActiveMQConnectionFactory cf = new ActiveMQConnectionFactory("failover:(" + tcpUri + ")");
+        final Connection connection = cf.createConnection();
+
         new Thread(new Runnable() {
             public void run() {
                 try { connection.start(); } catch (Throwable ignored) {}
             }
         }).start();
-        
-        Thread.sleep(timeout * 5);
-        
+
         int count = 0;
-        for (Thread thread : Thread.getAllStackTraces().keySet()) {
-            if (thread.getName().contains("ActiveMQ Transport")) { count++; }
-        }
-        
+        assertTrue("Transport count: " + count + ", expected <= 1", Wait.waitFor(new Wait.Condition(){
+            public boolean isSatisified() throws Exception {
+                int count = 0;
+                for (Thread thread : Thread.getAllStackTraces().keySet()) {
+                    if (thread.getName().contains("ActiveMQ Transport")) { count++; }
+                }
+                return count == 1;
+        }}));
+
         broker.interrupt();
         broker.join();
-        
-        assertTrue("Transport count: " + count + ", expected <= 1", count <= 1);        
-    }   
-    
+    }
+
     class MockBroker extends Thread {
-        
+        ServerSocket ss = null;
+        public MockBroker() {
+            super("MockBroker");
+        }
+
         public void run() {
-            
+
             List<Socket> inProgress = new ArrayList<Socket>();
             ServerSocketFactory factory = ServerSocketFactory.getDefault();
-            ServerSocket ss = null;
-            
+
             try {
-                ss = factory.createServerSocket(61616);
-                
+                ss = factory.createServerSocket(0);
+                ss.setSoTimeout(5000);
+
+                socketReadyLatch.countDown();
                 while (!interrupted()) {
                     inProgress.add(ss.accept());    // eat socket
                 }
+            } catch (java.net.SocketTimeoutException expected) {
             } catch (Exception e) {
                 e.printStackTrace();
             } finally {
                 try { ss.close(); } catch (IOException ignored) {}
-                for (Socket s : inProgress) {               
+                for (Socket s : inProgress) {
                     try { s.close(); } catch (IOException ignored) {}
-                }               
-            }           
+                }
+            }
         }
     }
 }

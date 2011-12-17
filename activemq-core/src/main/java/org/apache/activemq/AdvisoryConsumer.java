@@ -96,6 +96,9 @@ public class AdvisoryConsumer implements ActiveMQDispatcher {
 
         ActiveMQTempDestination tempDest = (ActiveMQTempDestination)dest;
         if (dinfo.getOperationType() == DestinationInfo.ADD_OPERATION_TYPE) {
+            if (tempDest.getConnection() != null) {
+                tempDest = (ActiveMQTempDestination) tempDest.createDestination(tempDest.getPhysicalName());
+            }
             connection.activeTempDestinations.put(tempDest, tempDest);
         } else if (dinfo.getOperationType() == DestinationInfo.REMOVE_OPERATION_TYPE) {
             connection.activeTempDestinations.remove(tempDest);

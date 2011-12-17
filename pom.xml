@@ -19,7 +19,7 @@
   <parent>
     <groupId>org.apache</groupId>
     <artifactId>apache</artifactId>
-    <version>7</version>
+    <version>9</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
 
@@ -45,16 +45,15 @@
     <aopalliance-version>1.0</aopalliance-version>
     <aries-version>0.2-incubating</aries-version>
     <axion-version>1.0-M3-dev</axion-version>
-    <axis-version>1.4</axis-version>
-    <camel-version>2.8.0</camel-version>
-    <camel-web-version>2.4.0</camel-web-version>
+    <axis-version>1.4.2</axis-version>
+    <camel-version>2.8.2</camel-version>
     <cglib-version>2.0</cglib-version>
     <openjpa-version>1.2.0</openjpa-version>
     <commons-beanutils-version>1.8.3</commons-beanutils-version>
     <commons-collections-version>3.2.1</commons-collections-version>
-    <commons-daemon-version>1.0.5</commons-daemon-version>
+    <commons-daemon-version>1.0.7</commons-daemon-version>
     <commons-dbcp-version>1.4</commons-dbcp-version>
-    <commons-httpclient-version>3.1</commons-httpclient-version>
+    <httpclient-version>4.1.2</httpclient-version>
     <commons-io-version>1.4</commons-io-version>
     <commons-lang-version>2.6</commons-lang-version>
     <commons-logging-version>1.1.1</commons-logging-version>
@@ -64,16 +63,17 @@
     <directory-version>1.5.7</directory-version>
     <geronimo-version>1.0</geronimo-version>
     <howl-version>0.1.8</howl-version>
+    <hawtbuf-version>1.6</hawtbuf-version>
     <hsqldb-version>1.7.2.2</hsqldb-version>
     <jasypt-version>1.8</jasypt-version>
     <jdom-version>1.0</jdom-version>
-    <jetty-version>7.1.6.v20100715</jetty-version>
+    <jetty-version>7.5.1.v20110908</jetty-version>
     <jsp-version>2.1.v20100127</jsp-version>
     <jstl-version>1.1.2</jstl-version>
     <jettison-version>1.3</jettison-version>
     <jmock-version>2.5.1</jmock-version>
     <josql-version>1.5</josql-version>
-    <junit-version>4.8.2</junit-version>
+    <junit-version>4.10</junit-version>
     <jxta-version>2.0</jxta-version>
     <karaf-version>2.2.0</karaf-version>
     <log4j-version>1.2.16</log4j-version>
@@ -81,22 +81,27 @@
     <p2psockets-version>1.1.2</p2psockets-version>
     <regexp-version>1.3</regexp-version>
     <rome-version>1.0</rome-version>
-    <slf4j-version>1.6.2</slf4j-version>
+    <slf4j-version>1.6.4</slf4j-version>
     <spring-oxm-version>1.5.10</spring-oxm-version>
     <xalan-version>2.7.0</xalan-version>
     <xmlbeans-version>2.2.0</xmlbeans-version>
     <xpp3-version>1.1.4c</xpp3-version>
-    <xstream-version>1.4.1</xstream-version>
-    <xbean-version>3.7</xbean-version>
+    <xstream-version>1.4.2</xstream-version>
+    <xbean-version>3.9-SNAPSHOT</xbean-version>
     <velocity-version>1.6.4</velocity-version>
     <ftpserver-version>1.0.0</ftpserver-version>
     <activemq-protobuf-version>1.1</activemq-protobuf-version>
     <opensymphony-version>2.4.2</opensymphony-version>
     <zookeeper-version>3.0.0</zookeeper-version>
-    <org.osgi.core-version>4.3.0</org.osgi.core-version>
+    <org.osgi.core-version>4.1.0</org.osgi.core-version>
     <woodstox-core-asl-version>4.0.8</woodstox-core-asl-version>
     <stax2-api-version>3.0.2</stax2-api-version>
     <site-repo-url>scpexe://people.apache.org/www/activemq.apache.org/maven/</site-repo-url>
+    <source-version>1.6</source-version>
+    <target-version>1.6</target-version>
+    <javase-javadoc-url>http://download.oracle.com/javase/6/docs/api/</javase-javadoc-url>
+    <javaee-javadoc-url>http://download.oracle.com/javaee/6/api/</javaee-javadoc-url>
+    <slf4j-javadoc-url>http://www.slf4j.org/apidocs/</slf4j-javadoc-url>
     <!-- Maven Plugin Version for this Project -->
     <maven-bundle-plugin-version>2.3.5</maven-bundle-plugin-version>
     <maven-surefire-plugin-version>2.9</maven-surefire-plugin-version>
@@ -463,12 +468,6 @@
         <artifactId>camel-test</artifactId>
         <version>${camel-version}</version>
       </dependency>
-      <dependency>
-        <groupId>org.apache.camel</groupId>
-        <artifactId>camel-web</artifactId>
-        <version>${camel-web-version}</version>
-        <type>war</type>
-      </dependency>
 
       <dependency>
         <groupId>org.osgi</groupId>
@@ -811,9 +810,9 @@
       </dependency>
 
       <dependency>
-        <groupId>commons-httpclient</groupId>
-        <artifactId>commons-httpclient</artifactId>
-        <version>${commons-httpclient-version}</version>
+        <groupId>org.apache.httpcomponents</groupId>
+        <artifactId>httpclient</artifactId>
+        <version>${httpclient-version}</version>
       </dependency>
 
       <dependency>
@@ -990,6 +989,7 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-jar-plugin</artifactId>
+          <version>${maven-jar-plugin-version}</version>
           <configuration>
             <archive>
               <index>true</index>
@@ -1073,17 +1073,12 @@
     <plugin>
       <groupId>org.apache.maven.plugins</groupId>
       <artifactId>maven-compiler-plugin</artifactId>
-          <version>${maven-compiler-plugin-version}</version>
-    </plugin>
-    <plugin>
-      <groupId>org.apache.maven.plugins</groupId>
-      <artifactId>maven-jar-plugin</artifactId>
-          <version>${maven-jar-plugin-version}</version>
+      <version>${maven-compiler-plugin-version}</version>
     </plugin>
     <plugin>
       <groupId>org.apache.maven.plugins</groupId>
       <artifactId>maven-archiver</artifactId>
-          <version>${maven-archiver-version}</version>
+      <version>${maven-archiver-version}</version>
     </plugin>
       </plugins>
     </pluginManagement>
@@ -1092,8 +1087,8 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
         <configuration>
-          <source>1.6</source>
-          <target>1.6</target>
+          <source>${source-version}</source>
+          <target>${target-version}</target>
           <optimize>true</optimize>
           <debug>true</debug>
           <showDeprecation>true</showDeprecation>
@@ -1185,7 +1180,6 @@
             <!-- activemq-xmpp schemas -->
             <exclude>**/resources/*.xsd</exclude>
             <!-- web, web-console, web-demo files -->
-            <exclude>**/webapps/camel/js/dojo/dojo.js</exclude>
             <exclude>**/webapp/js/dojo.js</exclude>
             <exclude>**/webapp/js/jquery-*.js</exclude>
             <exclude>**/webapp/js/prototype.js</exclude>
@@ -1244,13 +1238,13 @@
         <version>${maven-javadoc-plugin-version}</version>
         <configuration>
           <links>
-            <link>http://java.sun.com/j2se/1.5.0/docs/api/</link>
-            <link>http://java.sun.com/javaee/5/docs/api/</link>
+            <link>${javase-javadoc-url}</link>
+            <link>${javaee-javadoc-url}</link>
             <link>http://jakarta.apache.org/commons/collections/apidocs-COLLECTIONS_3_0/</link>
             <link>http://jakarta.apache.org/commons/dbcp/apidocs/</link>
             <link>http://jakarta.apache.org/commons/fileupload/apidocs/</link>
-            <link>http://jakarta.apache.org/commons/httpclient/apidocs/</link>
-            <link>http://jakarta.apache.org/commons/logging/apidocs/</link>
+            <link>http://hc.apache.org/httpcomponents-client-ga/httpclient/apidocs/</link>
+            <link>${slf4j-javadoc-url}</link>
             <link>http://jakarta.apache.org/commons/pool/apidocs/</link>
             <link>http://junit.sourceforge.net/javadoc/</link>
             <link>http://logging.apache.org/log4j/docs/api/</link>

@@ -48,6 +48,8 @@ import org.apache.activemq.advisory.ConsumerListener;
 import org.apache.activemq.broker.BrokerFactory;
 import org.apache.activemq.broker.BrokerService;
 import org.apache.activemq.broker.TransportConnector;
+import org.apache.activemq.broker.region.RegionBroker;
+import org.apache.activemq.broker.region.TopicRegion;
 import org.apache.activemq.command.ActiveMQDestination;
 import org.apache.activemq.command.ActiveMQQueue;
 import org.apache.activemq.command.ActiveMQTopic;
@@ -85,11 +87,11 @@ public class JmsMultipleBrokersTestSupport extends CombinationTestSupport {
         return bridgeBrokers(localBrokerName, remoteBrokerName, false, 1, true);
     }
 
-    protected void bridgeBrokers(String localBrokerName, String remoteBrokerName, boolean dynamicOnly) throws Exception {
+    protected NetworkConnector bridgeBrokers(String localBrokerName, String remoteBrokerName, boolean dynamicOnly) throws Exception {
         BrokerService localBroker = brokers.get(localBrokerName).broker;
         BrokerService remoteBroker = brokers.get(remoteBrokerName).broker;
 
-        bridgeBrokers(localBroker, remoteBroker, dynamicOnly, 1, true, false);
+        return bridgeBrokers(localBroker, remoteBroker, dynamicOnly, 1, true, false);
     }
 
     protected NetworkConnector bridgeBrokers(String localBrokerName, String remoteBrokerName, boolean dynamicOnly, int networkTTL, boolean conduit) throws Exception {
@@ -177,7 +179,7 @@ public class JmsMultipleBrokersTestSupport extends CombinationTestSupport {
                     int activeCount = 0;
                     for (NetworkBridge bridge : broker.getNetworkConnectors().get(bridgeIndex).activeBridges()) {
                         if (bridge.getRemoteBrokerName() != null) {
-                            LOG.info("found bridge to " + bridge.getRemoteBrokerName() + " on broker :" + broker.getBrokerName());
+                            LOG.info("found bridge[" + bridge + "] to " + bridge.getRemoteBrokerName() + " on broker :" + broker.getBrokerName());
                             activeCount++;
                         }
                     }
@@ -185,6 +187,18 @@ public class JmsMultipleBrokersTestSupport extends CombinationTestSupport {
                 }}, wait);
         }
         return result;
+    }
+
+    protected void waitForMinTopicRegionConsumerCount(final String name, final int count) throws Exception {
+        final BrokerService broker = brokers.get(name).broker;
+        final TopicRegion topicRegion =  (TopicRegion) ((RegionBroker) broker.getRegionBroker()).getTopicRegion();
+        assertTrue("found expected consumers in topic region of" + name, Wait.waitFor(new Wait.Condition() {
+            @Override
+            public boolean isSatisified() throws Exception {
+                LOG.info("topic consumers: " + name +", " +  topicRegion.getSubscriptions().toString());
+                return topicRegion.getSubscriptions().size()  >= count;
+            }
+        }));
     }
 
     protected void waitForBridgeFormation() throws Exception {

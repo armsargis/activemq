@@ -195,7 +195,7 @@ public class BrokerService implements Service {
     private Scheduler scheduler;
     private ThreadPoolExecutor executor;
     private boolean slave = true;
-    private int schedulePeriodForDestinationPurge=5000;
+    private int schedulePeriodForDestinationPurge= 0;
     private int maxPurgedDestinationsPerSweep = 0;
     private BrokerContext brokerContext;
     private boolean networkConnectorStartAsync = false;
@@ -439,6 +439,20 @@ public class BrokerService implements Service {
         return started.get();
     }
 
+    /**
+     * Forces a start of the broker. 
+     * By default a BrokerService instance that was 
+     * previously stopped using BrokerService.stop() cannot be restarted
+     * using BrokerService.start(). 
+     * This method enforces a restart. 
+     * It is not recommended to force a restart of the broker and will not work
+     * for most but some very trivial broker configurations. 
+     * For restarting a broker instance we recommend to first call stop() on
+     * the old instance and then recreate a new BrokerService instance.
+     * 
+     * @param force - if true enforces a restart.
+     * @throws Exception
+     */
     public void start(boolean force) throws Exception {
         forceStart = force;
         stopped.set(false);
@@ -534,7 +548,7 @@ public class BrokerService implements Service {
             getBroker().brokerServiceStarted();
             startedLatch.countDown();
         } catch (Exception e) {
-            LOG.error("Failed to start ActiveMQ JMS Message Broker. Reason: " + e, e);
+            LOG.error("Failed to start ActiveMQ JMS Message Broker (" + getBrokerName() + ", " + brokerId + "). Reason: " + e, e);
             try {
                 if (!stopped.get()) {
                     stop();
@@ -593,17 +607,20 @@ public class BrokerService implements Service {
             tempDataStore.stop();
             tempDataStore = null;
         }
-        stopper.stop(persistenceAdapter);
-        persistenceAdapter = null;
-        slave = true;
-        if (isUseJmx()) {
-            stopper.stop(getManagementContext());
-            managementContext = null;
+        try {
+            stopper.stop(persistenceAdapter);
+            persistenceAdapter = null;
+            slave = true;
+            if (isUseJmx()) {
+                stopper.stop(getManagementContext());
+                managementContext = null;
+            }
+            // Clear SelectorParser cache to free memory
+            SelectorParser.clearCache();
+        } finally {
+            stopped.set(true);
+            stoppedLatch.countDown();
         }
-        // Clear SelectorParser cache to free memory
-        SelectorParser.clearCache();
-        stopped.set(true);
-        stoppedLatch.countDown();
         if (masterConnectorURI == null) {
             // master start has not finished yet
             if (slaveStartSignal.getCount() == 1) {
@@ -876,6 +893,7 @@ public class BrokerService implements Service {
 
     /**
      * Sets whether or not persistence is enabled or disabled.
+     * @org.apache.xbean.Property propertyEditor="org.apache.activemq.util.BooleanEditor"
      */
     public void setPersistent(boolean persistent) {
         this.persistent = persistent;
@@ -1046,6 +1064,7 @@ public class BrokerService implements Service {
     /**
      * Sets whether or not the Broker's services should be exposed into JMX or
      * not.
+     * @org.apache.xbean.Property propertyEditor="org.apache.activemq.util.BooleanEditor"
      */
     public void setUseJmx(boolean useJmx) {
         this.useJmx = useJmx;
@@ -1204,6 +1223,7 @@ public class BrokerService implements Service {
     /**
      * Allows the support of advisory messages to be disabled for performance
      * reasons.
+     * @org.apache.xbean.Property propertyEditor="org.apache.activemq.util.BooleanEditor"
      */
     public void setAdvisorySupport(boolean advisorySupport) {
         this.advisorySupport = advisorySupport;
@@ -1312,6 +1332,7 @@ public class BrokerService implements Service {
     /**
      * Sets whether or not all messages are deleted on startup - mostly only
      * useful for testing.
+     * @org.apache.xbean.Property propertyEditor="org.apache.activemq.util.BooleanEditor"
      */
     public void setDeleteAllMessagesOnStartup(boolean deletePersistentMessagesOnStartup) {
         this.deleteAllMessagesOnStartup = deletePersistentMessagesOnStartup;
@@ -2203,7 +2224,7 @@ public class BrokerService implements Service {
         if (ioExceptionHandler != null) {
             ioExceptionHandler.handle(exception);
          } else {
-            LOG.info("Ignoring IO exception, " + exception, exception);
+            LOG.info("No IOExceptionHandler registered, ignoring IO exception, " + exception, exception);
          }
     }
 
@@ -2278,6 +2299,9 @@ public class BrokerService implements Service {
         return systemExitOnShutdown;
     }
 
+    /**
+     * @org.apache.xbean.Property propertyEditor="org.apache.activemq.util.BooleanEditor"
+     */
     public void setSystemExitOnShutdown(boolean systemExitOnShutdown) {
         this.systemExitOnShutdown = systemExitOnShutdown;
     }
@@ -2302,6 +2326,9 @@ public class BrokerService implements Service {
         return shutdownOnSlaveFailure;
     }
 
+    /**
+     * @org.apache.xbean.Property propertyEditor="org.apache.activemq.util.BooleanEditor"
+     */
     public void setShutdownOnSlaveFailure(boolean shutdownOnSlaveFailure) {
         this.shutdownOnSlaveFailure = shutdownOnSlaveFailure;
     }
@@ -2310,6 +2337,9 @@ public class BrokerService implements Service {
         return waitForSlave;
     }
 
+    /**
+     * @org.apache.xbean.Property propertyEditor="org.apache.activemq.util.BooleanEditor"
+     */
     public void setWaitForSlave(boolean waitForSlave) {
         this.waitForSlave = waitForSlave;
     }
@@ -2337,6 +2367,7 @@ public class BrokerService implements Service {
     /**
      * Set the passiveSlave
      * @param passiveSlave the passiveSlave to set
+     * @org.apache.xbean.Property propertyEditor="org.apache.activemq.util.BooleanEditor"
      */
     public void setPassiveSlave(boolean passiveSlave) {
         this.passiveSlave = passiveSlave;
@@ -2366,6 +2397,7 @@ public class BrokerService implements Service {
 
     /**
      * @param schedulerSupport the schedulerSupport to set
+     * @org.apache.xbean.Property propertyEditor="org.apache.activemq.util.BooleanEditor"
      */
     public void setSchedulerSupport(boolean schedulerSupport) {
         this.schedulerSupport = schedulerSupport;

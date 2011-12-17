@@ -33,6 +33,7 @@
   <properties>
     <activemq.osgi.import.pkg>
       com.thoughtworks.xstream*;resolution:=optional,
+      org.xmlpull*;resolution:=optional,
       javax.xml.stream*;resolution:=optional,
       javax.annotation*;resolution:=optional,
       javax.transaction*;resolution:=optional,
@@ -195,12 +196,6 @@
       <scope>test</scope>
     </dependency>
     <dependency>
-      <groupId>${project.groupId}</groupId>
-      <artifactId>activeio-core</artifactId>
-      <optional>false</optional>
-      <type>test-jar</type>
-    </dependency>
-    <dependency>
       <groupId>org.springframework</groupId>
       <artifactId>spring-jms</artifactId>
       <scope>test</scope>
@@ -292,15 +287,15 @@
         <artifactId>maven-javadoc-plugin</artifactId>
         <configuration>
           <links>
-            <link>http://java.sun.com/j2se/1.5.0/docs/api/</link>
-            <link>http://java.sun.com/j2ee/1.4/docs/api/</link>
-            <link>http://jakarta.apache.org/commons/logging/apidocs/</link>
+            <link>${javase-javadoc-url}</link>
+            <link>${javaee-javadoc-url}</link>
+            <link>${slf4j-javadoc-url}</link>
             <link>http://junit.sourceforge.net/javadoc/</link>
           </links>
           <stylesheetfile>${basedir}/../etc/css/stylesheet.css</stylesheetfile>
           <linksource>true</linksource>
           <maxmemory>256m</maxmemory>
-          <source>1.5</source>
+          <source>${source-version}</source>
           <groups>
             <group>
               <title>JMS Client</title>
@@ -462,7 +457,7 @@
             <!-- this one is a little flaky and can fail on some platforms randomly -->
             <exclude>**/QuickJournalRecoveryBrokerTest.*</exclude>
             <exclude>**/QuickJournalXARecoveryBrokerTest.*</exclude>
-            <exclude>**/RendezvousDiscoverTransportTest.*</exclude>
+            <exclude>**/ZeroconfDiscoverTransportTest.*</exclude>
 
             <!-- m2 tests failing since move from assembly  -->
             <exclude>**/QueueConsumerCloseAndReconnectTest.*</exclude>
@@ -504,6 +499,7 @@
 
             <!-- breaks hudson: disable till we get a chance to give it the time that it needs - http://hudson.zones.apache.org/hudson/job/ActiveMQ/org.apache.activemq$activemq-core/199/testReport/org.apache.activemq.network/BrokerNetworkWithStuckMessagesTest/testBrokerNetworkWithStuckMessages/ -->
             <exclude>**/BrokerNetworkWithStuckMessagesTest.*</exclude>
+            <exclude>**/DoSTest.*</exclude>
 
           </excludes>
         </configuration>
@@ -619,6 +615,7 @@
           <execution>
           <phase>process-classes</phase>
             <configuration>
+              <strictXsdOrder>false</strictXsdOrder>
               <namespace>http://activemq.apache.org/schema/core</namespace>
               <schema>${basedir}/target/classes/activemq.xsd</schema>
               <outputDir>${basedir}/target/classes</outputDir>
@@ -672,7 +669,7 @@
                   <tasks>
                     <echo>Running OpenWire Generator</echo>
                     <taskdef name="generate" classname="org.apache.activemq.openwire.tool.JavaGeneratorTask" classpathref="maven.compile.classpath" />
-                    <generate version="8" basedir="${basedir}" />
+                    <generate version="9" basedir="${basedir}" />
                   </tasks>
                 </configuration>
                 <goals>
