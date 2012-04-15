@@ -25,6 +25,7 @@ import java.util.HashMap;
 
 public class StompCodec {
 
+    final static byte[] crlfcrlf = new byte[]{'\r','\n','\r','\n'};
     TcpTransport transport;
 
     ByteArrayOutputStream currentCommand = new ByteArrayOutputStream();
@@ -52,13 +53,13 @@ public class StompCodec {
            if (!processedHeaders) {
                currentCommand.write(b);
                // end of headers section, parse action and header
-               if (previousByte == '\n' && b == '\n') {
+               if (b == '\n' && (previousByte == '\n' || currentCommand.endsWith(crlfcrlf))) {
                    if (transport.getWireFormat() instanceof StompWireFormat) {
                        DataByteArrayInputStream data = new DataByteArrayInputStream(currentCommand.toByteArray());
                        action = ((StompWireFormat)transport.getWireFormat()).parseAction(data);
                        headers = ((StompWireFormat)transport.getWireFormat()).parseHeaders(data);
                        String contentLengthHeader = headers.get(Stomp.Headers.CONTENT_LENGTH);
-                       if (contentLengthHeader != null) {
+                       if ((action.equals(Stomp.Commands.SEND) || action.equals(Stomp.Responses.MESSAGE)) && contentLengthHeader != null) {
                            contentLength = ((StompWireFormat)transport.getWireFormat()).parseContentLength(contentLengthHeader);
                        } else {
                            contentLength = -1;

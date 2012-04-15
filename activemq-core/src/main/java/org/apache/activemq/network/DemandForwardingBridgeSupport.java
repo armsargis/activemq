@@ -16,28 +16,6 @@
  */
 package org.apache.activemq.network;
 
-import org.apache.activemq.Service;
-import org.apache.activemq.advisory.AdvisorySupport;
-import org.apache.activemq.broker.BrokerService;
-import org.apache.activemq.broker.BrokerServiceAware;
-import org.apache.activemq.broker.TransportConnection;
-import org.apache.activemq.broker.region.AbstractRegion;
-import org.apache.activemq.broker.region.DurableTopicSubscription;
-import org.apache.activemq.broker.region.RegionBroker;
-import org.apache.activemq.broker.region.Subscription;
-import org.apache.activemq.broker.region.policy.PolicyEntry;
-import org.apache.activemq.command.*;
-import org.apache.activemq.filter.DestinationFilter;
-import org.apache.activemq.filter.MessageEvaluationContext;
-import org.apache.activemq.thread.DefaultThreadPools;
-import org.apache.activemq.thread.TaskRunnerFactory;
-import org.apache.activemq.transport.*;
-import org.apache.activemq.transport.tcp.SslTransport;
-import org.apache.activemq.util.*;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import javax.management.ObjectName;
 import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.security.cert.X509Certificate;
@@ -51,10 +29,66 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
+import javax.management.ObjectName;
+
+import org.apache.activemq.Service;
+import org.apache.activemq.advisory.AdvisorySupport;
+import org.apache.activemq.broker.BrokerService;
+import org.apache.activemq.broker.BrokerServiceAware;
+import org.apache.activemq.broker.TransportConnection;
+import org.apache.activemq.broker.region.AbstractRegion;
+import org.apache.activemq.broker.region.DurableTopicSubscription;
+import org.apache.activemq.broker.region.RegionBroker;
+import org.apache.activemq.broker.region.Subscription;
+import org.apache.activemq.broker.region.policy.PolicyEntry;
+import org.apache.activemq.command.ActiveMQDestination;
+import org.apache.activemq.command.ActiveMQMessage;
+import org.apache.activemq.command.ActiveMQTempDestination;
+import org.apache.activemq.command.ActiveMQTopic;
+import org.apache.activemq.command.BrokerId;
+import org.apache.activemq.command.BrokerInfo;
+import org.apache.activemq.command.Command;
+import org.apache.activemq.command.ConnectionError;
+import org.apache.activemq.command.ConnectionId;
+import org.apache.activemq.command.ConnectionInfo;
+import org.apache.activemq.command.ConsumerId;
+import org.apache.activemq.command.ConsumerInfo;
+import org.apache.activemq.command.DataStructure;
+import org.apache.activemq.command.DestinationInfo;
+import org.apache.activemq.command.ExceptionResponse;
+import org.apache.activemq.command.KeepAliveInfo;
+import org.apache.activemq.command.Message;
+import org.apache.activemq.command.MessageAck;
+import org.apache.activemq.command.MessageDispatch;
+import org.apache.activemq.command.NetworkBridgeFilter;
+import org.apache.activemq.command.ProducerInfo;
+import org.apache.activemq.command.RemoveInfo;
+import org.apache.activemq.command.Response;
+import org.apache.activemq.command.SessionInfo;
+import org.apache.activemq.command.ShutdownInfo;
+import org.apache.activemq.command.WireFormatInfo;
+import org.apache.activemq.filter.DestinationFilter;
+import org.apache.activemq.filter.MessageEvaluationContext;
+import org.apache.activemq.thread.DefaultThreadPools;
+import org.apache.activemq.thread.TaskRunnerFactory;
+import org.apache.activemq.transport.DefaultTransportListener;
+import org.apache.activemq.transport.FutureResponse;
+import org.apache.activemq.transport.ResponseCallback;
+import org.apache.activemq.transport.Transport;
+import org.apache.activemq.transport.TransportDisposedIOException;
+import org.apache.activemq.transport.TransportFilter;
+import org.apache.activemq.transport.tcp.SslTransport;
+import org.apache.activemq.util.IdGenerator;
+import org.apache.activemq.util.IntrospectionSupport;
+import org.apache.activemq.util.LongSequenceGenerator;
+import org.apache.activemq.util.MarshallingSupport;
+import org.apache.activemq.util.ServiceStopper;
+import org.apache.activemq.util.ServiceSupport;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * A useful base class for implementing demand forwarding bridges.
- *
- *
  */
 public abstract class DemandForwardingBridgeSupport implements NetworkBridge, BrokerServiceAware {
     private static final Logger LOG = LoggerFactory.getLogger(DemandForwardingBridgeSupport.class);
@@ -87,7 +121,7 @@ public abstract class DemandForwardingBridgeSupport implements NetworkBridge, Br
     protected CountDownLatch localStartedLatch = new CountDownLatch(1);
     protected final AtomicBoolean lastConnectSucceeded = new AtomicBoolean(false);
     protected NetworkBridgeConfiguration configuration;
-    protected NetworkBridgeFilterFactory filterFactory;
+    protected final NetworkBridgeFilterFactory defaultFilterFactory = new DefaultNetworkBridgeFilterFactory();
 
     protected final BrokerId remoteBrokerPath[] = new BrokerId[] {null};
     protected Object brokerInfoMutex = new Object();
@@ -338,9 +372,11 @@ public abstract class DemandForwardingBridgeSupport implements NetworkBridge, Br
                     ss.throwFirstException();
                 }
             }
-            brokerService.getBroker().removeBroker(null, remoteBrokerInfo);
-            brokerService.getBroker().networkBridgeStopped(remoteBrokerInfo);
-            LOG.info(configuration.getBrokerName() + " bridge to " + remoteBrokerName + " stopped");
+            if (remoteBrokerInfo != null) {
+                brokerService.getBroker().removeBroker(null, remoteBrokerInfo);
+                brokerService.getBroker().networkBridgeStopped(remoteBrokerInfo);
+                LOG.info(configuration.getBrokerName() + " bridge to " + remoteBrokerName + " stopped");
+            }
         }
     }
 
@@ -368,11 +404,7 @@ public abstract class DemandForwardingBridgeSupport implements NetworkBridge, Br
                     waitStarted();
                     MessageDispatch md = (MessageDispatch) command;
                     serviceRemoteConsumerAdvisory(md.getMessage().getDataStructure());
-                    demandConsumerDispatched++;
-                    if (demandConsumerDispatched > (demandConsumerInfo.getPrefetchSize() * .75)) {
-                        remoteBroker.oneway(new MessageAck(md, MessageAck.STANDARD_ACK_TYPE, demandConsumerDispatched));
-                        demandConsumerDispatched = 0;
-                    }
+                    ackAdvisory(md.getMessage());
                 } else if (command.isBrokerInfo()) {
                     lastConnectSucceeded.set(true);
                     remoteBrokerInfo = (BrokerInfo) command;
@@ -411,6 +443,7 @@ public abstract class DemandForwardingBridgeSupport implements NetworkBridge, Br
                             if (AdvisorySupport.isConsumerAdvisoryTopic(message.getDestination())
                                 || AdvisorySupport.isDestinationAdvisoryTopic(message.getDestination())) {
                                 serviceRemoteConsumerAdvisory(message.getDataStructure());
+                                ackAdvisory(message);
                             } else {
                                 if (!isPermissableDestination(message.getDestination(), true)) {
                                     return;
@@ -430,6 +463,16 @@ public abstract class DemandForwardingBridgeSupport implements NetworkBridge, Br
                             case SessionInfo.DATA_STRUCTURE_TYPE:
                             case ProducerInfo.DATA_STRUCTURE_TYPE:
                                 localBroker.oneway(command);
+                                break;
+                            case MessageAck.DATA_STRUCTURE_TYPE:
+                                MessageAck ack = (MessageAck) command;
+                                DemandSubscription localSub = subscriptionMapByRemoteId.get(ack.getConsumerId());
+                                if (localSub != null) {
+                                    ack.setConsumerId(localSub.getLocalInfo().getConsumerId());
+                                    localBroker.oneway(ack);
+                                } else {
+                                    LOG.warn("Matching local subscription not found for ack: " + ack);
+                                }
                                 break;
                             case ConsumerInfo.DATA_STRUCTURE_TYPE:
                                 localStartedLatch.await();
@@ -480,6 +523,16 @@ public abstract class DemandForwardingBridgeSupport implements NetworkBridge, Br
         }
     }
 
+    private void ackAdvisory(Message message) throws IOException {
+        demandConsumerDispatched++;
+        if (demandConsumerDispatched > (demandConsumerInfo.getPrefetchSize() * .75)) {
+            MessageAck ack = new MessageAck(message, MessageAck.STANDARD_ACK_TYPE, demandConsumerDispatched);
+            ack.setConsumerId(demandConsumerInfo.getConsumerId());
+            remoteBroker.oneway(ack);
+            demandConsumerDispatched = 0;
+        }
+    }
+
     private void serviceRemoteConsumerAdvisory(DataStructure data) throws IOException {
         final int networkTTL = configuration.getNetworkTTL();
         if (data.getClass() == ConsumerInfo.class) {
@@ -520,7 +573,7 @@ public abstract class DemandForwardingBridgeSupport implements NetworkBridge, Br
             synchronized (brokerService.getVmConnectorURI()) {
                 if (addConsumerInfo(info)) {
                     if (LOG.isDebugEnabled()) {
-                        LOG.debug(configuration.getBrokerName() + " bridging sub on " + localBroker + " from " + remoteBrokerName + " : " + info);
+                        LOG.debug(configuration.getBrokerName() + " bridged sub on " + localBroker + " from " + remoteBrokerName + " : " + info);
                     }
                 } else {
                     if (LOG.isDebugEnabled()) {
@@ -555,7 +608,7 @@ public abstract class DemandForwardingBridgeSupport implements NetworkBridge, Br
             }
             destInfo.setBrokerPath(appendToBrokerPath(destInfo.getBrokerPath(), getRemoteBrokerPath()));
             if (LOG.isTraceEnabled()) {
-                LOG.trace(configuration.getBrokerName() +" bridging destination control command: " + destInfo);
+                LOG.trace(configuration.getBrokerName() + " bridging " + (destInfo.isAddOperation() ? "add" : "remove") + " destination on " + localBroker + " from " + remoteBrokerName + ", destination: " + destInfo);
             }
             localBroker.oneway(destInfo);
         } else if (data.getClass() == RemoveInfo.class) {
@@ -593,6 +646,7 @@ public abstract class DemandForwardingBridgeSupport implements NetworkBridge, Br
                 LOG.debug(configuration.getBrokerName() + " remove local subscription for remote " + sub.getRemoteInfo().getConsumerId());
             }
             subscriptionMapByLocalId.remove(sub.getLocalInfo().getConsumerId());
+            subscriptionMapByRemoteId.remove(sub.getRemoteInfo().getConsumerId());
 
             // continue removal in separate thread to free up this thread for outstanding responses
             asyncTaskRunner.execute(new Runnable() {
@@ -1134,18 +1188,14 @@ public abstract class DemandForwardingBridgeSupport implements NetworkBridge, Br
     }
 
     protected NetworkBridgeFilter createNetworkBridgeFilter(ConsumerInfo info) throws IOException {
-        if (filterFactory == null)  {
-            if (brokerService != null && brokerService.getDestinationPolicy() != null) {
-                PolicyEntry entry = brokerService.getDestinationPolicy().getEntryFor(info.getDestination());
-                if (entry != null) {
-                    filterFactory = entry.getNetworkBridgeFilterFactory();
-                }
-            }
-            if (filterFactory == null) {
-                filterFactory = new DefaultNetworkBridgeFilterFactory();
+        NetworkBridgeFilterFactory filterFactory = defaultFilterFactory;
+        if (brokerService != null && brokerService.getDestinationPolicy() != null) {
+            PolicyEntry entry = brokerService.getDestinationPolicy().getEntryFor(info.getDestination());
+            if (entry != null && entry.getNetworkBridgeFilterFactory() != null) {
+                filterFactory = entry.getNetworkBridgeFilterFactory();
             }
         }
-         return filterFactory.create(info, getRemoteBrokerPath(), configuration.getNetworkTTL() );
+        return filterFactory.create(info, getRemoteBrokerPath(), configuration.getNetworkTTL());
     }
 
     protected void serviceLocalBrokerInfo(Command command) throws InterruptedException {

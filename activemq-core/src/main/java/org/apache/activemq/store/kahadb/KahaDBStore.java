@@ -32,6 +32,8 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.activemq.broker.ConnectionContext;
+import org.apache.activemq.broker.region.Destination;
+import org.apache.activemq.broker.region.RegionBroker;
 import org.apache.activemq.command.ActiveMQDestination;
 import org.apache.activemq.command.ActiveMQQueue;
 import org.apache.activemq.command.ActiveMQTempQueue;
@@ -283,6 +285,20 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
         }
     }
 
+    @Override
+    void rollbackStatsOnDuplicate(KahaDestination commandDestination) {
+        if (brokerService != null) {
+            RegionBroker regionBroker = (RegionBroker) brokerService.getRegionBroker();
+            if (regionBroker != null) {
+                Set<Destination> destinationSet = regionBroker.getDestinations(convert(commandDestination));
+                for (Destination destination : destinationSet) {
+                    destination.getDestinationStatistics().getMessages().decrement();
+                    destination.getDestinationStatistics().getEnqueues().decrement();
+                }
+            }
+        }
+    }
+
     private Location findMessageLocation(final String key, final KahaDestination destination) throws IOException {
         return pageFile.tx().execute(new Transaction.CallableClosure<Location, IOException>() {
             public Location execute(Transaction tx) throws IOException {
@@ -440,11 +456,11 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
             // operations... but for now we must
             // externally synchronize...
             Location location;
-            indexLock.readLock().lock();
+            indexLock.writeLock().lock();
             try {
                 location = findMessageLocation(key, dest);
             }finally {
-                indexLock.readLock().unlock();
+                indexLock.writeLock().unlock();
             }
             if (location == null) {
                 return null;
@@ -456,7 +472,7 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
         public int getMessageCount() throws IOException {
             try {
                 lockAsyncJobQueue();
-                indexLock.readLock().lock();
+                indexLock.writeLock().lock();
                 try {
                     return pageFile.tx().execute(new Transaction.CallableClosure<Integer, IOException>() {
                         public Integer execute(Transaction tx) throws IOException {
@@ -474,7 +490,7 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
                         }
                     });
                 }finally {
-                    indexLock.readLock().unlock();
+                    indexLock.writeLock().unlock();
                 }
             } finally {
                 unlockAsyncJobQueue();
@@ -483,7 +499,7 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
 
         @Override
         public boolean isEmpty() throws IOException {
-            indexLock.readLock().lock();
+            indexLock.writeLock().lock();
             try {
                 return pageFile.tx().execute(new Transaction.CallableClosure<Boolean, IOException>() {
                     public Boolean execute(Transaction tx) throws IOException {
@@ -494,7 +510,7 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
                     }
                 });
             }finally {
-                indexLock.readLock().unlock();
+                indexLock.writeLock().unlock();
             }
         }
 
@@ -524,7 +540,7 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
 
 
         public void recoverNextMessages(final int maxReturned, final MessageRecoveryListener listener) throws Exception {
-            indexLock.readLock().lock();
+            indexLock.writeLock().lock();
             try {
                 pageFile.tx().execute(new Transaction.Closure<Exception>() {
                     public void execute(Transaction tx) throws Exception {
@@ -548,12 +564,13 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
                     }
                 });
             }finally {
-                indexLock.readLock().unlock();
+                indexLock.writeLock().unlock();
             }
         }
 
         public void resetBatching() {
             if (pageFile.isLoaded()) {
+                indexLock.writeLock().lock();
                 try {
                     pageFile.tx().execute(new Transaction.Closure<Exception>() {
                         public void execute(Transaction tx) throws Exception {
@@ -564,6 +581,8 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
                         });
                 } catch (Exception e) {
                     LOG.error("Failed to reset batching",e);
+                }finally {
+                    indexLock.writeLock().unlock();
                 }
             }
         }
@@ -720,7 +739,7 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
         public SubscriptionInfo[] getAllSubscriptions() throws IOException {
 
             final ArrayList<SubscriptionInfo> subscriptions = new ArrayList<SubscriptionInfo>();
-            indexLock.readLock().lock();
+            indexLock.writeLock().lock();
             try {
                 pageFile.tx().execute(new Transaction.Closure<IOException>() {
                     public void execute(Transaction tx) throws IOException {
@@ -736,7 +755,7 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
                     }
                 });
             }finally {
-                indexLock.readLock().unlock();
+                indexLock.writeLock().unlock();
             }
 
             SubscriptionInfo[] rc = new SubscriptionInfo[subscriptions.size()];
@@ -746,7 +765,7 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
 
         public SubscriptionInfo lookupSubscription(String clientId, String subscriptionName) throws IOException {
             final String subscriptionKey = subscriptionKey(clientId, subscriptionName);
-            indexLock.readLock().lock();
+            indexLock.writeLock().lock();
             try {
                 return pageFile.tx().execute(new Transaction.CallableClosure<SubscriptionInfo, IOException>() {
                     public SubscriptionInfo execute(Transaction tx) throws IOException {
@@ -760,7 +779,7 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
                     }
                 });
             }finally {
-                indexLock.readLock().unlock();
+                indexLock.writeLock().unlock();
             }
         }
 
@@ -917,7 +936,7 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
     public Set<ActiveMQDestination> getDestinations() {
         try {
             final HashSet<ActiveMQDestination> rc = new HashSet<ActiveMQDestination>();
-            indexLock.readLock().lock();
+            indexLock.writeLock().lock();
             try {
                 pageFile.tx().execute(new Transaction.Closure<IOException>() {
                     public void execute(Transaction tx) throws IOException {
@@ -944,7 +963,7 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
                     }
                 });
             }finally {
-                indexLock.readLock().unlock();
+                indexLock.writeLock().unlock();
             }
             return rc;
         } catch (IOException e) {
@@ -980,7 +999,7 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
     }
 
     public void checkpoint(boolean sync) throws IOException {
-        super.checkpointCleanup(false);
+        super.checkpointCleanup(sync);
     }
 
     // /////////////////////////////////////////////////////////////////
@@ -1037,7 +1056,14 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
         }
         int type = Integer.parseInt(dest.substring(0, p));
         String name = dest.substring(p + 1);
+        return convert(type, name);
+    }
 
+    private ActiveMQDestination convert(KahaDestination commandDestination) {
+        return convert(commandDestination.getType().getNumber(), commandDestination.getName());
+    }
+
+    private ActiveMQDestination convert(int type, String name) {
         switch (KahaDestination.DestinationType.valueOf(type)) {
         case QUEUE:
             return new ActiveMQQueue(name);

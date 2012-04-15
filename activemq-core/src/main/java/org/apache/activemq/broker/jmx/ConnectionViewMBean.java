@@ -16,6 +16,8 @@
  */
 package org.apache.activemq.broker.jmx;
 
+import javax.management.ObjectName;
+
 import org.apache.activemq.Service;
 
 public interface ConnectionViewMBean extends Service {
@@ -42,16 +44,16 @@ public interface ConnectionViewMBean extends Service {
      */
     @MBeanInfo("Connection is active (both connected and receiving messages).")
     boolean isActive();
-    
+
     /**
      * Resets the statistics
      */
     @MBeanInfo("Resets the statistics")
     void resetStatistics();
-    
+
     /**
      * Returns the source address for this connection
-     * 
+     *
      * @return the source address for this connection
      */
     @MBeanInfo("Source address for this connection")
@@ -63,5 +65,30 @@ public interface ConnectionViewMBean extends Service {
      */
     @MBeanInfo("The number of messages pending dispatch")
     public int getDispatchQueueSize();
+
+    /**
+     * Returns the User Name used to authorize creation of this Connection.
+     * This value can be null if display of user name information is disabled.
+     *
+     * @return the name of the user that created this Connection
+     */
+    @MBeanInfo("User Name used to authorize creation of this connection")
+    String getUserName();
+
+    /**
+     * Returns the ObjectNames of all the Consumers created by this Connection.
+     *
+     * @return the ObjectNames of all Consumers created by this Connection.
+     */
+    @MBeanInfo("The ObjectNames of all Consumers created by this Connection")
+    ObjectName[] getConsumers();
+
+    /**
+     * Returns the ObjectNames of all the Producers created by this Connection.
+     *
+     * @return the ObjectNames of all Producers created by this Connection.
+     */
+    @MBeanInfo("The ObjectNames of all Producers created by this Connection")
+    ObjectName[] getProducers();
 
 }

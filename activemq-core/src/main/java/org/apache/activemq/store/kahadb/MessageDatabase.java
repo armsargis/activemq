@@ -18,9 +18,33 @@ package org.apache.activemq.store.kahadb;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.*;
-import java.util.*;
+import java.io.DataInput;
+import java.io.DataOutput;
+import java.io.EOFException;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InterruptedIOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.Stack;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -32,7 +56,18 @@ import org.apache.activemq.command.MessageAck;
 import org.apache.activemq.command.SubscriptionInfo;
 import org.apache.activemq.command.TransactionId;
 import org.apache.activemq.protobuf.Buffer;
-import org.apache.activemq.store.kahadb.data.*;
+import org.apache.activemq.store.kahadb.data.KahaAddMessageCommand;
+import org.apache.activemq.store.kahadb.data.KahaCommitCommand;
+import org.apache.activemq.store.kahadb.data.KahaDestination;
+import org.apache.activemq.store.kahadb.data.KahaEntryType;
+import org.apache.activemq.store.kahadb.data.KahaPrepareCommand;
+import org.apache.activemq.store.kahadb.data.KahaProducerAuditCommand;
+import org.apache.activemq.store.kahadb.data.KahaRemoveDestinationCommand;
+import org.apache.activemq.store.kahadb.data.KahaRemoveMessageCommand;
+import org.apache.activemq.store.kahadb.data.KahaRollbackCommand;
+import org.apache.activemq.store.kahadb.data.KahaSubscriptionCommand;
+import org.apache.activemq.store.kahadb.data.KahaTraceCommand;
+import org.apache.activemq.store.kahadb.data.KahaTransactionInfo;
 import org.apache.activemq.util.Callback;
 import org.apache.activemq.util.IOHelper;
 import org.apache.activemq.util.ServiceStopper;
@@ -46,7 +81,17 @@ import org.apache.kahadb.journal.Location;
 import org.apache.kahadb.page.Page;
 import org.apache.kahadb.page.PageFile;
 import org.apache.kahadb.page.Transaction;
-import org.apache.kahadb.util.*;
+import org.apache.kahadb.util.ByteSequence;
+import org.apache.kahadb.util.DataByteArrayInputStream;
+import org.apache.kahadb.util.DataByteArrayOutputStream;
+import org.apache.kahadb.util.LocationMarshaller;
+import org.apache.kahadb.util.LockFile;
+import org.apache.kahadb.util.LongMarshaller;
+import org.apache.kahadb.util.Marshaller;
+import org.apache.kahadb.util.Sequence;
+import org.apache.kahadb.util.SequenceSet;
+import org.apache.kahadb.util.StringMarshaller;
+import org.apache.kahadb.util.VariableMarshaller;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -55,7 +100,7 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
     protected BrokerService brokerService;
 
     public static final String PROPERTY_LOG_SLOW_ACCESS_TIME = "org.apache.activemq.store.kahadb.LOG_SLOW_ACCESS_TIME";
-    public static final int LOG_SLOW_ACCESS_TIME = Integer.parseInt(System.getProperty(PROPERTY_LOG_SLOW_ACCESS_TIME, "0"));
+    public static final int LOG_SLOW_ACCESS_TIME = Integer.getInteger(PROPERTY_LOG_SLOW_ACCESS_TIME, 0);
     public static final File DEFAULT_DIRECTORY = new File("KahaDB");
     protected static final Buffer UNMATCHED;
     static {
@@ -67,7 +112,6 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
     static final int CLOSED_STATE = 1;
     static final int OPEN_STATE = 2;
     static final long NOT_ACKED = -1;
-    static final long UNMATCHED_SEQ = -2;
 
     static final int VERSION = 4;
 
@@ -184,6 +228,9 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
     private boolean archiveCorruptedIndex = false;
     private boolean useIndexLFRUEviction = false;
     private float indexLFUEvictionFactor = 0.2f;
+    private boolean enableIndexDiskSyncs = true;
+    private boolean enableIndexRecoveryFile = true;
+    private boolean enableIndexPageCaching = true;
 
     public MessageDatabase() {
     }
@@ -244,6 +291,10 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
     }
 
     private void startCheckpoint() {
+        if (checkpointInterval == 0 &&  cleanupInterval == 0) {
+            LOG.info("periodic checkpoint/cleanup disabled, will ocurr on clean shutdown/restart");
+            return;
+        }
         synchronized (checkpointThreadLock) {
             boolean start = false;
             if (checkpointThread == null) {
@@ -261,15 +312,15 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
                             long lastCheckpoint = System.currentTimeMillis();
                             // Sleep for a short time so we can periodically check
                             // to see if we need to exit this thread.
-                            long sleepTime = Math.min(checkpointInterval, 500);
+                            long sleepTime = Math.min(checkpointInterval > 0 ? checkpointInterval : cleanupInterval, 500);
                             while (opened.get()) {
                                 Thread.sleep(sleepTime);
                                 long now = System.currentTimeMillis();
-                                if( now - lastCleanup >= cleanupInterval ) {
+                                if( cleanupInterval > 0 && (now - lastCleanup >= cleanupInterval) ) {
                                     checkpointCleanup(true);
                                     lastCleanup = now;
                                     lastCheckpoint = now;
-                                } else if( now - lastCheckpoint >= checkpointInterval ) {
+                                } else if( checkpointInterval > 0 && (now - lastCheckpoint >= checkpointInterval )) {
                                     checkpointCleanup(false);
                                     lastCheckpoint = now;
                                 }
@@ -294,8 +345,11 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
             getJournal().start();
             try {
                 loadPageFile();
-            } catch (IOException ioe) {
-                LOG.warn("Index corrupted, trying to recover ...", ioe);
+            } catch (Throwable t) {
+                LOG.warn("Index corrupted. Recovering the index through journal replay. Cause:" + t);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Index load failure", t);
+                }
                 // try to recover index
                 try {
                     pageFile.unload();
@@ -305,6 +359,8 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
                 } else {
                     pageFile.delete();
                 }
+                metadata = new Metadata();
+                pageFile = null;
                 loadPageFile();
             }
             startCheckpoint();
@@ -377,11 +433,13 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
             try {
                 this.indexLock.writeLock().lock();
                 try {
-                    pageFile.tx().execute(new Transaction.Closure<IOException>() {
-                        public void execute(Transaction tx) throws IOException {
-                            checkpointUpdate(tx, true);
-                        }
-                    });
+                    if (metadata.page != null) {
+                        pageFile.tx().execute(new Transaction.Closure<IOException>() {
+                            public void execute(Transaction tx) throws IOException {
+                                checkpointUpdate(tx, true);
+                            }
+                        });
+                    }
                     pageFile.unload();
                     metadata = new Metadata();
                 } finally {
@@ -389,7 +447,9 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
                 }
                 journal.close();
                 synchronized (checkpointThreadLock) {
-                    checkpointThread.join();
+                    if (checkpointThread != null) {
+                        checkpointThread.join();
+                    }
                 }
             } finally {
                 lockFile.unlock();
@@ -405,11 +465,13 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
                 metadata.state = CLOSED_STATE;
                 metadata.firstInProgressTransactionLocation = getFirstInProgressTxLocation();
 
-                pageFile.tx().execute(new Transaction.Closure<IOException>() {
-                    public void execute(Transaction tx) throws IOException {
-                        tx.store(metadata.page, metadataMarshaller, true);
-                    }
-                });
+                if (metadata.page != null) {
+                    pageFile.tx().execute(new Transaction.Closure<IOException>() {
+                        public void execute(Transaction tx) throws IOException {
+                            tx.store(metadata.page, metadataMarshaller, true);
+                        }
+                    });
+                }
             }
         } finally {
             this.indexLock.writeLock().unlock();
@@ -778,13 +840,6 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
         }
     }
 
-    // /////////////////////////////////////////////////////////////////
-    // Methods call by the broker to update and query the store.
-    // /////////////////////////////////////////////////////////////////
-    public Location store(JournalCommand<?> data) throws IOException {
-        return store(data, false, null,null);
-    }
-
     public ByteSequence toByteSequence(JournalCommand<?> data) throws IOException {
         int size = data.serializedSizeFramed();
         DataByteArrayOutputStream os = new DataByteArrayOutputStream(size + 1);
@@ -793,20 +848,35 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
         return os.toByteSequence();
     }
 
+    // /////////////////////////////////////////////////////////////////
+    // Methods call by the broker to update and query the store.
+    // /////////////////////////////////////////////////////////////////
+    public Location store(JournalCommand<?> data) throws IOException {
+        return store(data, false, null,null);
+    }
+
+    public Location store(JournalCommand<?> data, Runnable onJournalStoreComplete) throws IOException {
+        return store(data, false, null,null, onJournalStoreComplete);
+    }
+
+    public Location store(JournalCommand<?> data, boolean sync, Runnable before,Runnable after) throws IOException {
+        return store(data, sync, before, after, null);
+    }
+
     /**
      * All updated are are funneled through this method. The updates are converted
      * to a JournalMessage which is logged to the journal and then the data from
      * the JournalMessage is used to update the index just like it would be done
      * during a recovery process.
      */
-    public Location store(JournalCommand<?> data, boolean sync, Runnable before,Runnable after) throws IOException {
+    public Location store(JournalCommand<?> data, boolean sync, Runnable before,Runnable after, Runnable onJournalStoreComplete) throws IOException {
         if (before != null) {
             before.run();
         }
         try {
             ByteSequence sequence = toByteSequence(data);
             long start = System.currentTimeMillis();
-            Location location = journal.write(sequence, sync);
+            Location location = onJournalStoreComplete == null ? journal.write(sequence, sync) :  journal.write(sequence, onJournalStoreComplete) ;
             long start2 = System.currentTimeMillis();
             process(data, location, after);
             long end = System.currentTimeMillis();
@@ -1137,6 +1207,7 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
                 LOG.warn("Duplicate message add attempt rejected. Destination: " + command.getDestination().getName() + ", Message id: " + command.getMessageId());
                 sd.messageIdIndex.put(tx, command.getMessageId(), previous);
                 sd.locationIndex.remove(tx, location);
+                rollbackStatsOnDuplicate(command.getDestination());
             }
         } else {
             // restore the previous value.. Looks like this was a redo of a
@@ -1151,6 +1222,8 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
         metadata.producerSequenceIdTracker.isDuplicate(command.getMessageId());
         metadata.lastUpdate = location;
     }
+
+    abstract void rollbackStatsOnDuplicate(KahaDestination commandDestination);
 
     void updateIndex(Transaction tx, KahaRemoveMessageCommand command, Location ackLocation) throws IOException {
         StoredDestination sd = getStoredDestination(command.getDestination(), tx);
@@ -1259,6 +1332,12 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
             sd.subscriptionAcks.remove(tx, subscriptionKey);
             sd.subscriptionCache.remove(subscriptionKey);
             removeAckLocationsForSub(tx, sd, subscriptionKey);
+
+            if (sd.subscriptions.isEmpty(tx)) {
+                sd.messageIdIndex.clear(tx);
+                sd.locationIndex.clear(tx);
+                sd.orderIndex.clear(tx);
+            }
         }
     }
 
@@ -1405,13 +1484,25 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
         LOG.debug("Checkpoint done.");
     }
 
+    final Runnable nullCompletionCallback = new Runnable() {
+        @Override
+        public void run() {
+        }
+    };
     private Location checkpointProducerAudit() throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         ObjectOutputStream oout = new ObjectOutputStream(baos);
         oout.writeObject(metadata.producerSequenceIdTracker);
         oout.flush();
         oout.close();
-        return store(new KahaProducerAuditCommand().setAudit(new Buffer(baos.toByteArray())), true, null, null);
+        // using completion callback allows a disk sync to be avoided when enableJournalDiskSyncs = false
+        Location location = store(new KahaProducerAuditCommand().setAudit(new Buffer(baos.toByteArray())), nullCompletionCallback);
+        try {
+            location.getLatch().await();
+        } catch (InterruptedException e) {
+            throw new InterruptedIOException(e.toString());
+        }
+        return location;
     }
 
     public HashSet<Integer> getJournalFilesBeingReplicated() {
@@ -1535,7 +1626,7 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
 
     protected class StoredDestinationMarshaller extends VariableMarshaller<StoredDestination> {
 
-        public StoredDestination readPayload(DataInput dataIn) throws IOException {
+        public StoredDestination readPayload(final DataInput dataIn) throws IOException {
             final StoredDestination value = new StoredDestination();
             value.orderIndex.defaultPriorityIndex = new BTreeIndex<Long, MessageKeys>(pageFile, dataIn.readLong());
             value.locationIndex = new BTreeIndex<Location, Long>(pageFile, dataIn.readLong());
@@ -1544,14 +1635,14 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
             if (dataIn.readBoolean()) {
                 value.subscriptions = new BTreeIndex<String, KahaSubscriptionCommand>(pageFile, dataIn.readLong());
                 value.subscriptionAcks = new BTreeIndex<String, LastAck>(pageFile, dataIn.readLong());
-                if (metadata.version >= VERSION) {
+                if (metadata.version >= 4) {
                     value.ackPositions = new ListIndex<String, SequenceSet>(pageFile, dataIn.readLong());
                 } else {
                     // upgrade
                     pageFile.tx().execute(new Transaction.Closure<IOException>() {
                         public void execute(Transaction tx) throws IOException {
                             BTreeIndex<Long, HashSet<String>> oldAckPositions =
-                                new BTreeIndex<Long, HashSet<String>>(pageFile, tx.allocate());
+                                new BTreeIndex<Long, HashSet<String>>(pageFile, dataIn.readLong());
                             oldAckPositions.setKeyMarshaller(LongMarshaller.INSTANCE);
                             oldAckPositions.setValueMarshaller(HashSetStringMarshaller.INSTANCE);
                             oldAckPositions.load(tx);
@@ -1738,13 +1829,22 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
             Iterator<Entry<String, SequenceSet>> subscriptions = rc.ackPositions.iterator(tx);
             while (subscriptions.hasNext()) {
                 Entry<String, SequenceSet> subscription = subscriptions.next();
-                if (subscription.getValue() != null) {
-                    for(Long sequenceId : subscription.getValue()) {
+                SequenceSet pendingAcks = subscription.getValue();
+                if (pendingAcks != null && !pendingAcks.isEmpty()) {
+                    Long lastPendingAck = pendingAcks.getTail().getLast();
+                    for(Long sequenceId : pendingAcks) {
                         Long current = rc.messageReferences.get(sequenceId);
                         if (current == null) {
                             current = new Long(0);
                         }
-                        rc.messageReferences.put(sequenceId, Long.valueOf(current.longValue() + 1));
+
+                        // We always add a trailing empty entry for the next position to start from
+                        // so we need to ensure we don't count that as a message reference on reload.
+                        if (!sequenceId.equals(lastPendingAck)) {
+                            current = current.longValue() + 1;
+                        }
+
+                        rc.messageReferences.put(sequenceId, current);
                     }
                 }
             }
@@ -1823,8 +1923,7 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
     // on a new message add, all existing subs are interested in this message
     private void addAckLocationForNewMessage(Transaction tx, StoredDestination sd, Long messageSequence) throws IOException {
         for(String subscriptionKey : sd.subscriptionCache) {
-            SequenceSet sequences = null;
-            sequences = sd.ackPositions.get(tx, subscriptionKey);
+            SequenceSet sequences = sd.ackPositions.get(tx, subscriptionKey);
             if (sequences == null) {
                 sequences = new SequenceSet();
                 sequences.add(new Sequence(messageSequence, messageSequence + 1));
@@ -1854,19 +1953,16 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
             ArrayList<Long> unreferenced = new ArrayList<Long>();
 
             for(Long sequenceId : sequences) {
-                long references = 0;
-                Long count = sd.messageReferences.get(sequenceId);
-                if (count != null) {
-                    references = count.longValue() - 1;
-                } else {
-                    continue;
-                }
+                Long references = sd.messageReferences.get(sequenceId);
+                if (references != null) {
+                    references = references.longValue() - 1;
 
-                if (references > 0) {
-                    sd.messageReferences.put(sequenceId, Long.valueOf(references));
-                } else {
-                    sd.messageReferences.remove(sequenceId);
-                    unreferenced.add(sequenceId);
+                    if (references.longValue() > 0) {
+                        sd.messageReferences.put(sequenceId, references);
+                    } else {
+                        sd.messageReferences.remove(sequenceId);
+                        unreferenced.add(sequenceId);
+                    }
                 }
             }
 
@@ -2058,6 +2154,9 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
         index.setPageCacheSize(indexCacheSize);
         index.setUseLFRUEviction(isUseIndexLFRUEviction());
         index.setLFUEvictionFactor(getIndexLFUEvictionFactor());
+        index.setEnableDiskSyncs(isEnableIndexDiskSyncs());
+        index.setEnableRecoveryFile(isEnableIndexRecoveryFile());
+        index.setEnablePageCaching(isEnableIndexPageCaching());
         return index;
     }
 
@@ -2070,6 +2169,7 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
         manager.setWriteBatchSize(getJournalMaxWriteBatchSize());
         manager.setArchiveDataLogs(isArchiveDataLogs());
         manager.setSizeAccumulator(storeSize);
+        manager.setEnableAsyncDiskSync(isEnableJournalDiskSyncs());
         if (getDirectoryArchive() != null) {
             IOHelper.mkdirs(getDirectoryArchive());
             manager.setDirectoryArchive(getDirectoryArchive());
@@ -2297,6 +2397,30 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
         this.useIndexLFRUEviction = useIndexLFRUEviction;
     }
 
+    public void setEnableIndexDiskSyncs(boolean enableIndexDiskSyncs) {
+        this.enableIndexDiskSyncs = enableIndexDiskSyncs;
+    }
+
+    public void setEnableIndexRecoveryFile(boolean enableIndexRecoveryFile) {
+        this.enableIndexRecoveryFile = enableIndexRecoveryFile;
+    }
+
+    public void setEnableIndexPageCaching(boolean enableIndexPageCaching) {
+        this.enableIndexPageCaching = enableIndexPageCaching;
+    }
+
+    public boolean isEnableIndexDiskSyncs() {
+        return enableIndexDiskSyncs;
+    }
+
+    public boolean isEnableIndexRecoveryFile() {
+        return enableIndexRecoveryFile;
+    }
+
+    public boolean isEnableIndexPageCaching() {
+        return enableIndexPageCaching;
+    }
+
     // /////////////////////////////////////////////////////////////////
     // Internal conversion methods.
     // /////////////////////////////////////////////////////////////////
@@ -2424,6 +2548,14 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
                     nextMessageId = lastEntry.getKey() + 1;
                 }
             }
+        }
+
+        void clear(Transaction tx) throws IOException {
+            this.remove(tx);
+            this.resetCursorPosition();
+            this.allocate(tx);
+            this.load(tx);
+            this.configureLast(tx);
         }
 
         void remove(Transaction tx) throws IOException {

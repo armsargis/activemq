@@ -92,6 +92,7 @@ public class JDBCPersistenceAdapter extends DataSourceSupport implements Persist
     private boolean createTablesOnStartup = true;
     private DataSource lockDataSource;
     private int transactionIsolation;
+    private File directory;
     
     protected int maxProducersToAudit=1024;
     protected int maxAuditDepth=1000;
@@ -111,7 +112,6 @@ public class JDBCPersistenceAdapter extends DataSourceSupport implements Persist
     }
 
     public Set<ActiveMQDestination> getDestinations() {
-        // Get a connection and insert the message into the DB.
         TransactionContext c = null;
         try {
             c = getTransactionContext();
@@ -201,11 +201,29 @@ public class JDBCPersistenceAdapter extends DataSourceSupport implements Persist
 
     /**
      * Cleanup method to remove any state associated with the given destination
-     * No state retained.... nothing to do
-     *
      * @param destination Destination to forget
      */
     public void removeQueueMessageStore(ActiveMQQueue destination) {
+        if (destination.isQueue() && getBrokerService().shouldRecordVirtualDestination(destination)) {
+            try {
+                removeConsumerDestination(destination);
+            } catch (IOException ioe) {
+                LOG.error("Failed to remove consumer destination: " + destination, ioe);
+            }
+        }
+    }
+
+    private void removeConsumerDestination(ActiveMQQueue destination) throws IOException {
+        TransactionContext c = getTransactionContext();
+        try {
+            String id = destination.getQualifiedName();
+            getAdapter().doDeleteSubscription(c, destination, id, id);
+        } catch (SQLException e) {
+            JDBCPersistenceAdapter.log("JDBC Failure: ", e);
+            throw IOExceptionSupport.create("Failed to remove consumer destination: " + destination, e);
+        } finally {
+            c.close();
+        }
     }
 
     /**
@@ -638,6 +656,14 @@ public class JDBCPersistenceAdapter extends DataSourceSupport implements Persist
     }
 
     public void setDirectory(File dir) {
+        this.directory=dir;
+    }
+    
+    public File getDirectory(){
+        if (this.directory==null && brokerService != null){
+            this.directory=brokerService.getBrokerDataDirectory();
+        }
+        return this.directory;
     }
 
     // interesting bit here is proof that DB is ok

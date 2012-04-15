@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.util.Iterator;
 import java.util.Map.Entry;
 import java.util.NoSuchElementException;
+
 import org.apache.kahadb.page.Page;
 import org.apache.kahadb.page.Transaction;
 import org.apache.kahadb.util.LinkedNode;
@@ -198,10 +199,22 @@ public final class ListNode<Key,Value> {
                     if (currentNode.isHead() && currentNode.isTail()) {
                         // store empty list
                     } else if (currentNode.isHead()) {
-                        // new head
+                        // merge next node into existing headNode
+                        // as we don't want to change our headPageId b/c
+                        // that is our identity
+                        ListNode<Key,Value> headNode = currentNode;
+                        nextEntry = getFromNextNode(); // will move currentNode
+
+                        if (currentNode.isTail()) {
+                            targetList.setTailPageId(headNode.getPageId());
+                        }
+                        // copy next/currentNode into head
+                        headNode.setEntries(currentNode.entries);
+                        headNode.setNext(currentNode.getNext());
+                        headNode.store(tx);
                         toRemoveNode = currentNode;
-                        nextEntry = getFromNextNode();
-                        targetList.setHeadPageId(currentNode.getPageId());
+                        currentNode = headNode;
+
                     } else if (currentNode.isTail()) {
                         toRemoveNode = currentNode;
                         previousNode.setNext(ListIndex.NOT_SET);
@@ -262,7 +275,7 @@ public final class ListNode<Key,Value> {
         @SuppressWarnings({ "unchecked", "rawtypes" })
         public ListNode<Key,Value> readPayload(DataInput is) throws IOException {
             ListNode<Key,Value> node = new ListNode<Key,Value>();
-            node.next = is.readLong();
+            node.setNext(is.readLong());
             final short size = is.readShort();
             for (short i = 0; i < size; i++) {
                 node.entries.addLast(
@@ -313,6 +326,11 @@ public final class ListNode<Key,Value> {
             } else {
                 getContainingList().storeNode(tx, this, false);
             }
+
+            if (this.next == -1) {
+                getContainingList().setTailPageId(getPageId());
+            }
+
         } catch ( Transaction.PageOverflowIOException e ) {
             // If we get an overflow
             split(tx, addFirst);
@@ -331,15 +349,16 @@ public final class ListNode<Key,Value> {
         ListNode<Key, Value> extension = getContainingList().createNode(tx);
         if (isAddFirst) {
             // head keeps the first entry, insert extension with the rest
-            extension.setNext(this.getNext());
-            this.setNext(extension.getPageId());
             extension.setEntries(entries.getHead().splitAfter());
-        }  else {
+            extension.setNext(this.getNext());
+            extension.store(tx, isAddFirst);
             this.setNext(extension.getPageId());
+        }  else {
             extension.setEntries(entries.getTail().getPrevious().splitAfter());
+            extension.store(tx, isAddFirst);
             getContainingList().setTailPageId(extension.getPageId());
+            this.setNext(extension.getPageId());
         }
-        extension.store(tx, isAddFirst);
         store(tx, true);
     }
 

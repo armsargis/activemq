@@ -98,6 +98,11 @@ public abstract class BaseDestination implements Destination {
     private boolean reduceMemoryFootprint = false;
     protected final Scheduler scheduler;
     private boolean disposed = false;
+    private boolean doOptimzeMessageStorage = true;
+    /*
+     * percentage of in-flight messages above which optimize message store is disabled
+     */
+    private int optimizeMessageStoreInFlightLimit = 10;
 
     /**
      * @param brokerService
@@ -713,6 +718,23 @@ public abstract class BaseDestination implements Destination {
     protected boolean isReduceMemoryFootprint() {
         return this.reduceMemoryFootprint;
     }
+
+    public boolean isDoOptimzeMessageStorage() {
+        return doOptimzeMessageStorage;
+    }
+
+    public void setDoOptimzeMessageStorage(boolean doOptimzeMessageStorage) {
+        this.doOptimzeMessageStorage = doOptimzeMessageStorage;
+    }
+
+    public int getOptimizeMessageStoreInFlightLimit() {
+        return optimizeMessageStoreInFlightLimit;
+    }
+
+    public void setOptimizeMessageStoreInFlightLimit(int optimizeMessageStoreInFlightLimit) {
+        this.optimizeMessageStoreInFlightLimit = optimizeMessageStoreInFlightLimit;
+    }
+
 
     public abstract List<Subscription> getConsumers();
 

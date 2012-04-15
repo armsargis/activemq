@@ -22,6 +22,7 @@ import java.net.URI;
 import java.net.URL;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 
 import javax.jms.BytesMessage;
 import javax.jms.Connection;
@@ -31,6 +32,7 @@ import javax.jms.Message;
 import javax.jms.MessageConsumer;
 import javax.jms.MessageProducer;
 import javax.jms.Session;
+import javax.jms.Topic;
 import javax.management.MBeanServer;
 import javax.management.MBeanServerInvocationHandler;
 import javax.management.MalformedObjectNameException;
@@ -60,8 +62,6 @@ import org.slf4j.LoggerFactory;
  * A test case of the various MBeans in ActiveMQ. If you want to look at the
  * various MBeans after the test has been run then run this test case as a
  * command line application.
- *
- *
  */
 public class MBeanTest extends EmbeddedBrokerTestSupport {
     private static final Logger LOG = LoggerFactory.getLogger(MBeanTest.class);
@@ -211,7 +211,6 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
         connection = connectionFactory.createConnection();
         useConnection(connection);
 
-
         ObjectName queueViewMBeanName = assertRegisteredObjectName(domain + ":Type=Queue,Destination=" + getDestinationString() + ",BrokerName=localhost");
         QueueViewMBean queue = (QueueViewMBean)MBeanServerInvocationHandler.newProxyInstance(mbeanServer, queueViewMBeanName, QueueViewMBean.class, true);
 
@@ -230,7 +229,6 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
         }
         consumer.close();
         session.close();
-
 
         // now lets get the dead letter queue
         Thread.sleep(1000);
@@ -259,7 +257,6 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
         int dlqMemUsage = dlq.getMemoryPercentUsage();
         assertTrue("dlq has some memory usage", dlqMemUsage > 0);
         assertEquals("dest has no memory usage", 0, queue.getMemoryPercentUsage());
-
 
         echo("About to retry " + messageCount + " messages");
 
@@ -332,6 +329,45 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
 
         assertEquals("Should have no more messages in the queue: " + queueViewMBeanName, 0, queue.getQueueSize());
         assertEquals("dest has no memory usage", 0, queue.getMemoryPercentUsage());
+    }
+
+    public void testCreateDestinationWithSpacesAtEnds() throws Exception {
+        ObjectName brokerName = assertRegisteredObjectName(domain + ":Type=Broker,BrokerName=localhost");
+        BrokerViewMBean broker = (BrokerViewMBean)MBeanServerInvocationHandler.newProxyInstance(mbeanServer, brokerName, BrokerViewMBean.class, true);
+
+        assertTrue("broker is not a slave", !broker.isSlave());
+        // create 2 topics
+        broker.addTopic(getDestinationString() + "1 ");
+        broker.addTopic(" " + getDestinationString() + "2");
+        broker.addTopic(" " + getDestinationString() + "3 ");
+
+        assertNotRegisteredObjectName(domain + ":Type=Topic,BrokerName=localhost,Destination=" + getDestinationString() + "1 ");
+        assertNotRegisteredObjectName(domain + ":Type=Topic,BrokerName=localhost,Destination= " + getDestinationString() + "2");
+        assertNotRegisteredObjectName(domain + ":Type=Topic,BrokerName=localhost,Destination= " + getDestinationString() + "3 ");
+
+        ObjectName topicObjName1 = assertRegisteredObjectName(domain + ":Type=Topic,BrokerName=localhost,Destination=" + getDestinationString() + "1");
+        ObjectName topicObjName2 = assertRegisteredObjectName(domain + ":Type=Topic,BrokerName=localhost,Destination=" + getDestinationString() + "2");
+        ObjectName topicObjName3 = assertRegisteredObjectName(domain + ":Type=Topic,BrokerName=localhost,Destination=" + getDestinationString() + "3");
+
+        TopicViewMBean topic1 = (TopicViewMBean)MBeanServerInvocationHandler.newProxyInstance(mbeanServer, topicObjName1, TopicViewMBean.class, true);
+        TopicViewMBean topic2 = (TopicViewMBean)MBeanServerInvocationHandler.newProxyInstance(mbeanServer, topicObjName2, TopicViewMBean.class, true);
+        TopicViewMBean topic3 = (TopicViewMBean)MBeanServerInvocationHandler.newProxyInstance(mbeanServer, topicObjName3, TopicViewMBean.class, true);
+
+        assertEquals("topic1 Durable subscriber count", 0, topic1.getConsumerCount());
+        assertEquals("topic2 Durable subscriber count", 0, topic2.getConsumerCount());
+        assertEquals("topic3 Durable subscriber count", 0, topic3.getConsumerCount());
+
+        String topicName = getDestinationString();
+        String selector = null;
+
+        // create 1 subscriber for each topic
+        broker.createDurableSubscriber(clientID, "topic1.subscriber1", topicName + "1", selector);
+        broker.createDurableSubscriber(clientID, "topic2.subscriber1", topicName + "2", selector);
+        broker.createDurableSubscriber(clientID, "topic3.subscriber1", topicName + "3", selector);
+
+        assertEquals("topic1 Durable subscriber count", 1, topic1.getConsumerCount());
+        assertEquals("topic2 Durable subscriber count", 1, topic2.getConsumerCount());
+        assertEquals("topic3 Durable subscriber count", 1, topic3.getConsumerCount());
     }
 
     @SuppressWarnings("rawtypes")
@@ -414,7 +450,6 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
         Object value = cdata.get(name);
         assertEquals("Message " + messageIndex + " CData field: " + name, expected, value);
     }
-
 
     protected void assertQueueBrowseWorks() throws Exception {
         Integer mbeancnt = mbeanServer.getMBeanCount();
@@ -626,6 +661,16 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
             echo("Bean Registered: " + objectName);
         } else {
             fail("Could not find MBean!: " + objectName);
+        }
+        return objectName;
+    }
+
+    protected ObjectName assertNotRegisteredObjectName(String name) throws MalformedObjectNameException, NullPointerException {
+        ObjectName objectName = new ObjectName(name);
+        if (mbeanServer.isRegistered(objectName)) {
+            fail("Found the MBean!: " + objectName);
+        } else {
+            echo("Bean not registered Registered: " + objectName);
         }
         return objectName;
     }
@@ -847,6 +892,190 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
         }
 
         assertTrue("dest has some memory usage", queue.getMemoryPercentUsage() > 0);
+    }
+
+    public void testSubscriptionViewToConnectionMBean() throws Exception {
+
+        connection = connectionFactory.createConnection("admin", "admin");
+        connection.setClientID("MBeanTest");
+        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+        Destination queue = session.createQueue(getDestinationString() + ".Queue");
+        MessageConsumer queueConsumer = session.createConsumer(queue);
+        MessageProducer producer = session.createProducer(queue);
+
+        ObjectName brokerName = assertRegisteredObjectName(domain + ":Type=Broker,BrokerName=localhost");
+        BrokerViewMBean broker = (BrokerViewMBean)MBeanServerInvocationHandler.newProxyInstance(mbeanServer, brokerName, BrokerViewMBean.class, true);
+
+        Thread.sleep(100);
+
+        assertTrue(broker.getQueueSubscribers().length == 1);
+
+        ObjectName subscriptionName = broker.getQueueSubscribers()[0];
+        LOG.info("Looking for Subscription: " + subscriptionName);
+
+        SubscriptionViewMBean subscriberView =
+            (SubscriptionViewMBean)MBeanServerInvocationHandler.newProxyInstance(
+                    mbeanServer, subscriptionName, SubscriptionViewMBean.class, true);
+        assertNotNull(subscriberView);
+
+        ObjectName connectionName = subscriberView.getConnection();
+        LOG.info("Looking for Connection: " + connectionName);
+        assertNotNull(connectionName);
+        ConnectionViewMBean connectionView =
+            (ConnectionViewMBean)MBeanServerInvocationHandler.newProxyInstance(
+                    mbeanServer, connectionName, ConnectionViewMBean.class, true);
+        assertNotNull(connectionView);
+
+        // Our consumer plus one advisory consumer.
+        assertEquals(2, connectionView.getConsumers().length);
+
+        // Check that the subscription view we found earlier is in this list.
+        boolean found = false;
+        for (ObjectName name : connectionView.getConsumers()) {
+            if (name.equals(subscriptionName)) {
+                found = true;
+            }
+        }
+        assertTrue("We should have found: " + subscriptionName, found);
+
+        // Our producer and no others.
+        assertEquals(1, connectionView.getProducers().length);
+
+        // Bean should detect the updates.
+        queueConsumer.close();
+        producer.close();
+
+        Thread.sleep(200);
+
+        // Only an advisory consumers now.
+        assertEquals(1, connectionView.getConsumers().length);
+        assertEquals(0, connectionView.getProducers().length);
+    }
+
+    public void testCreateAndUnsubscribeDurableSubscriptions() throws Exception {
+
+        connection = connectionFactory.createConnection("admin", "admin");
+        connection.setClientID("MBeanTest");
+
+        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+        String topicName = getDestinationString() + ".DurableTopic";
+        Topic topic = session.createTopic(topicName);
+
+        ObjectName brokerName = assertRegisteredObjectName(domain + ":Type=Broker,BrokerName=localhost");
+        echo("Create QueueView MBean...");
+        BrokerViewMBean broker = (BrokerViewMBean)MBeanServerInvocationHandler.newProxyInstance(mbeanServer, brokerName, BrokerViewMBean.class, true);
+
+        assertEquals("Durable subscriber count", 0, broker.getDurableTopicSubscribers().length);
+        assertEquals("Durable subscriber count", 0, broker.getInactiveDurableTopicSubscribers().length);
+
+        MessageConsumer durableConsumer1 = session.createDurableSubscriber(topic, "subscription1");
+        MessageConsumer durableConsumer2 = session.createDurableSubscriber(topic, "subscription2");
+
+        Thread.sleep(100);
+
+        assertEquals("Durable subscriber count", 2, broker.getDurableTopicSubscribers().length);
+        assertEquals("Durable subscriber count", 0, broker.getInactiveDurableTopicSubscribers().length);
+
+        durableConsumer1.close();
+        durableConsumer2.close();
+
+        Thread.sleep(100);
+
+        assertEquals("Durable subscriber count", 0, broker.getDurableTopicSubscribers().length);
+        assertEquals("Durable subscriber count", 2, broker.getInactiveDurableTopicSubscribers().length);
+
+        session.unsubscribe("subscription1");
+
+        Thread.sleep(100);
+
+        assertEquals("Inactive Durable subscriber count", 1, broker.getInactiveDurableTopicSubscribers().length);
+
+        session.unsubscribe("subscription2");
+
+        assertEquals("Inactive Durable subscriber count", 0, broker.getInactiveDurableTopicSubscribers().length);
+    }
+
+    public void testUserNamePopulated() throws Exception {
+        doTestUserNameInMBeans(true);
+    }
+
+    public void testUserNameNotPopulated() throws Exception {
+        doTestUserNameInMBeans(false);
+    }
+
+    @SuppressWarnings("unused")
+    private void doTestUserNameInMBeans(boolean expect) throws Exception {
+        broker.setPopulateUserNameInMBeans(expect);
+
+        connection = connectionFactory.createConnection("admin", "admin");
+        connection.setClientID("MBeanTest");
+        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+        Destination queue = session.createQueue(getDestinationString() + ".Queue");
+        Topic topic = session.createTopic(getDestinationString() + ".Topic");
+        MessageProducer producer = session.createProducer(queue);
+        MessageConsumer queueConsumer = session.createConsumer(queue);
+        MessageConsumer topicConsumer = session.createConsumer(topic);
+        MessageConsumer durable = session.createDurableSubscriber(topic, "Durable");
+
+        ObjectName brokerName = assertRegisteredObjectName(domain + ":Type=Broker,BrokerName=localhost");
+        BrokerViewMBean broker = (BrokerViewMBean)MBeanServerInvocationHandler.newProxyInstance(mbeanServer, brokerName, BrokerViewMBean.class, true);
+
+        Thread.sleep(100);
+
+        assertTrue(broker.getQueueProducers().length == 1);
+        assertTrue(broker.getTopicSubscribers().length == 2);
+        assertTrue(broker.getQueueSubscribers().length == 1);
+
+        ObjectName producerName = broker.getQueueProducers()[0];
+        ProducerViewMBean producerView = (ProducerViewMBean)MBeanServerInvocationHandler.newProxyInstance(mbeanServer, producerName, ProducerViewMBean.class, true);
+        assertNotNull(producerView);
+
+        if (expect) {
+            assertEquals("admin", producerView.getUserName());
+        } else {
+            assertNull(producerView.getUserName());
+        }
+
+        for (ObjectName name : broker.getTopicSubscribers()) {
+            SubscriptionViewMBean subscriberView = (SubscriptionViewMBean)MBeanServerInvocationHandler.newProxyInstance(mbeanServer, name, SubscriptionViewMBean.class, true);
+            if (expect) {
+                assertEquals("admin", subscriberView.getUserName());
+            } else {
+                assertNull(subscriberView.getUserName());
+            }
+        }
+
+        for (ObjectName name : broker.getQueueSubscribers()) {
+            SubscriptionViewMBean subscriberView = (SubscriptionViewMBean)MBeanServerInvocationHandler.newProxyInstance(mbeanServer, name, SubscriptionViewMBean.class, true);
+            if (expect) {
+                assertEquals("admin", subscriberView.getUserName());
+            } else {
+                assertNull(subscriberView.getUserName());
+            }
+        }
+
+        Set<ObjectName> names = mbeanServer.queryNames(null, null);
+        boolean found = false;
+        for (ObjectName name : names) {
+            if (name.toString().startsWith(domain + ":BrokerName=localhost,Type=Connection,ConnectorName=tcp") &&
+                name.toString().endsWith("Connection=MBeanTest")) {
+
+                ConnectionViewMBean connectionView =
+                    (ConnectionViewMBean)MBeanServerInvocationHandler.newProxyInstance(mbeanServer, name, ConnectionViewMBean.class, true);
+                assertNotNull(connectionView);
+
+                if (expect) {
+                    assertEquals("admin", connectionView.getUserName());
+                } else {
+                    assertNull(connectionView.getUserName());
+                }
+
+                found = true;
+                break;
+            }
+        }
+
+        assertTrue("Should find the connection's ManagedTransportConnection", found);
     }
 
     public void testBrowseBytesMessages() throws Exception {

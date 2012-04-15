@@ -16,26 +16,6 @@
  */
 package org.apache.activemq.broker;
 
-import java.io.EOFException;
-import java.io.IOException;
-import java.net.SocketException;
-import java.net.URI;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
-
-import javax.transaction.xa.XAResource;
 import org.apache.activemq.broker.ft.MasterBroker;
 import org.apache.activemq.broker.region.ConnectionStatistics;
 import org.apache.activemq.broker.region.RegionBroker;
@@ -68,6 +48,26 @@ import org.apache.activemq.util.URISupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+
+import javax.transaction.xa.XAResource;
+import java.io.EOFException;
+import java.io.IOException;
+import java.net.SocketException;
+import java.net.URI;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class TransportConnection implements Connection, Task, CommandVisitor {
     private static final Logger LOG = LoggerFactory.getLogger(TransportConnection.class);
@@ -119,6 +119,7 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
     private TransportConnectionStateRegister connectionStateRegister = new SingleTransportConnectionStateRegister();
     private final ReentrantReadWriteLock serviceLock = new ReentrantReadWriteLock();
     private String duplexNetworkConnectorId;
+    private Throwable stopError = null;
 
     /**
      * @param taskRunnerFactory - can be null if you want direct dispatch to the transport
@@ -250,6 +251,8 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
                 ConnectionError ce = new ConnectionError();
                 ce.setException(e);
                 dispatchSync(ce);
+                // Record the error that caused the transport to stop
+                this.stopError = e;
                 // Wait a little bit to try to get the output buffer to flush
                 // the exption notification to the client.
                 try {
@@ -267,7 +270,11 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
                 SERVICELOG.warn("Async error occurred: " + e, e);
                 ConnectionError ce = new ConnectionError();
                 ce.setException(e);
-                dispatchAsync(ce);
+                if (pendingStop) {
+                    dispatchSync(ce);
+                } else {
+                    dispatchAsync(ce);
+                }
             } finally {
                 inServiceException = false;
             }
@@ -280,20 +287,24 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
         boolean responseRequired = command.isResponseRequired();
         int commandId = command.getCommandId();
         try {
-            response = command.visit(this);
+            if (!pendingStop) {
+                response = command.visit(this);
+            } else {
+                response = new ExceptionResponse(this.stopError);
+            }
         } catch (Throwable e) {
             if (SERVICELOG.isDebugEnabled() && e.getClass() != BrokerStoppedException.class) {
                 SERVICELOG.debug("Error occured while processing " + (responseRequired ? "sync" : "async")
                         + " command: " + command + ", exception: " + e, e);
             }
 
-            if (responseRequired) {
+            if(e instanceof java.lang.SecurityException){
+                // still need to close this down - in case the peer of this transport doesn't play nice
+                delayedStop(2000, "Failed with SecurityException: " + e.getLocalizedMessage(), e);
+            }
 
+            if (responseRequired) {
                 response = new ExceptionResponse(e);
-                if(e instanceof java.lang.SecurityException){
-                  //still need to close this down - incase the peer of this transport doesn't play nice
-                  delayedStop(2000, "Failed with SecurityException: " + e.getLocalizedMessage());
-                }
             } else {
                 serviceException(e);
             }
@@ -482,6 +493,10 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
         SessionId sessionId = info.getProducerId().getParentId();
         ConnectionId connectionId = sessionId.getParentId();
         TransportConnectionState cs = lookupConnectionState(connectionId);
+        if (cs == null) {
+            throw new IllegalStateException("Cannot add a producer to a connection that had not been registered: "
+                    + connectionId);
+        }
         SessionState ss = cs.getSessionState(sessionId);
         if (ss == null) {
             throw new IllegalStateException("Cannot add a producer to a session that had not been registered: "
@@ -521,6 +536,10 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
         SessionId sessionId = info.getConsumerId().getParentId();
         ConnectionId connectionId = sessionId.getParentId();
         TransportConnectionState cs = lookupConnectionState(connectionId);
+        if (cs == null) {
+            throw new IllegalStateException("Cannot add a consumer to a connection that had not been registered: "
+                    + connectionId);
+        }
         SessionState ss = cs.getSessionState(sessionId);
         if (ss == null) {
             throw new IllegalStateException(broker.getBrokerName()
@@ -593,16 +612,14 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
         // this down.
         session.shutdown();
         // Cascade the connection stop to the consumers and producers.
-        for (Iterator iter = session.getConsumerIds().iterator(); iter.hasNext(); ) {
-            ConsumerId consumerId = (ConsumerId) iter.next();
+        for (ConsumerId consumerId : session.getConsumerIds()) {
             try {
                 processRemoveConsumer(consumerId, lastDeliveredSequenceId);
             } catch (Throwable e) {
                 LOG.warn("Failed to remove consumer: " + consumerId + ". Reason: " + e, e);
             }
         }
-        for (Iterator iter = session.getProducerIds().iterator(); iter.hasNext(); ) {
-            ProducerId producerId = (ProducerId) iter.next();
+        for (ProducerId producerId : session.getProducerIds()) {
             try {
                 processRemoveProducer(producerId);
             } catch (Throwable e) {
@@ -695,6 +712,9 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
             // send ConnectionCommand
             ConnectionControl command = this.connector.getConnectionControl();
             command.setFaultTolerant(broker.isFaultTolerantConfiguration());
+            if (info.isFailoverReconnect()) {
+                command.setRebalanceConnection(false);
+            }
             dispatchAsync(command);
         }
         return null;
@@ -709,8 +729,7 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
             // are shutting down.
             cs.shutdown();
             // Cascade the connection stop to the sessions.
-            for (Iterator iter = cs.getSessionIds().iterator(); iter.hasNext(); ) {
-                SessionId sessionId = (SessionId) iter.next();
+            for (SessionId sessionId : cs.getSessionIds()) {
                 try {
                     processRemoveSession(sessionId, lastDeliveredSequenceId);
                 } catch (Throwable e) {
@@ -718,8 +737,8 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
                 }
             }
             // Cascade the connection stop to temp destinations.
-            for (Iterator iter = cs.getTempDestinations().iterator(); iter.hasNext(); ) {
-                DestinationInfo di = (DestinationInfo) iter.next();
+            for (Iterator<DestinationInfo> iter = cs.getTempDestinations().iterator(); iter.hasNext(); ) {
+                DestinationInfo di = iter.next();
                 try {
                     broker.removeDestination(cs.getContext(), di.getDestination(), 0);
                 } catch (Throwable e) {
@@ -911,8 +930,12 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
         }
     }
 
-    public void delayedStop(final int waitTime, final String reason) {
+    public void delayedStop(final int waitTime, final String reason, Throwable cause) {
         if (waitTime > 0) {
+            synchronized (this) {
+                pendingStop = true;
+                stopError = cause;
+            }
             try {
                 DefaultThreadPools.getDefaultTaskRunnerFactory().execute(new Runnable() {
                     public void run() {
@@ -944,7 +967,10 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
             // so that in progress operations can notice and unblock.
             List<TransportConnectionState> connectionStates = listConnectionStates();
             for (TransportConnectionState cs : connectionStates) {
-                cs.getContext().getStopping().set(true);
+                ConnectionContext connectionContext = cs.getContext();
+                if (connectionContext != null) {
+                    connectionContext.getStopping().set(true);
+                }
             }
             try {
                 DefaultThreadPools.getDefaultTaskRunnerFactory().execute(new Runnable() {

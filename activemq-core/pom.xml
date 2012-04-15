@@ -92,6 +92,14 @@
       <artifactId>activemq-protobuf</artifactId>
       <optional>false</optional>
     </dependency>
+		<dependency>
+      <groupId>org.fusesource.fuse-extra</groupId>
+      <artifactId>fusemq-leveldb</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.fusesource.mqtt-client</groupId>
+      <artifactId>mqtt-client</artifactId>
+    </dependency>
 
     <!-- =============================== -->
     <!-- Optional Dependencies           -->
@@ -172,6 +180,7 @@
       <optional>true</optional>
     </dependency>
 
+    
     <!-- =============================== -->
     <!-- Testing Dependencies            -->
     <!-- =============================== -->
@@ -500,6 +509,8 @@
             <!-- breaks hudson: disable till we get a chance to give it the time that it needs - http://hudson.zones.apache.org/hudson/job/ActiveMQ/org.apache.activemq$activemq-core/199/testReport/org.apache.activemq.network/BrokerNetworkWithStuckMessagesTest/testBrokerNetworkWithStuckMessages/ -->
             <exclude>**/BrokerNetworkWithStuckMessagesTest.*</exclude>
             <exclude>**/DoSTest.*</exclude>
+
+            <exclude>**/mqtt/*</exclude>
 
           </excludes>
         </configuration>

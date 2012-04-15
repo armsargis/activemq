@@ -23,6 +23,7 @@ import java.net.URISyntaxException;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -30,6 +31,8 @@ import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -73,7 +76,9 @@ import org.apache.activemq.broker.region.virtual.VirtualDestinationInterceptor;
 import org.apache.activemq.broker.region.virtual.VirtualTopic;
 import org.apache.activemq.broker.scheduler.SchedulerBroker;
 import org.apache.activemq.command.ActiveMQDestination;
+import org.apache.activemq.command.ActiveMQQueue;
 import org.apache.activemq.command.BrokerId;
+import org.apache.activemq.filter.DestinationFilter;
 import org.apache.activemq.network.ConnectionFilter;
 import org.apache.activemq.network.DiscoveryNetworkConnector;
 import org.apache.activemq.network.NetworkConnector;
@@ -83,6 +88,7 @@ import org.apache.activemq.security.MessageAuthorizationPolicy;
 import org.apache.activemq.selector.SelectorParser;
 import org.apache.activemq.store.PersistenceAdapter;
 import org.apache.activemq.store.PersistenceAdapterFactory;
+import org.apache.activemq.store.amq.AMQPersistenceAdapter;
 import org.apache.activemq.store.kahadb.KahaDBPersistenceAdapter;
 import org.apache.activemq.store.kahadb.plist.PListStore;
 import org.apache.activemq.store.memory.MemoryPersistenceAdapter;
@@ -92,7 +98,15 @@ import org.apache.activemq.transport.TransportFactory;
 import org.apache.activemq.transport.TransportServer;
 import org.apache.activemq.transport.vm.VMTransportFactory;
 import org.apache.activemq.usage.SystemUsage;
-import org.apache.activemq.util.*;
+import org.apache.activemq.util.BrokerSupport;
+import org.apache.activemq.util.DefaultIOExceptionHandler;
+import org.apache.activemq.util.IOExceptionHandler;
+import org.apache.activemq.util.IOExceptionSupport;
+import org.apache.activemq.util.IOHelper;
+import org.apache.activemq.util.InetAddressUtil;
+import org.apache.activemq.util.JMXSupport;
+import org.apache.activemq.util.ServiceStopper;
+import org.apache.activemq.util.URISupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -117,6 +131,7 @@ public class BrokerService implements Service {
     private boolean persistent = true;
     private boolean populateJMSXUserID;
     private boolean useAuthenticatedPrincipalForJMSXUserID;
+    private boolean populateUserNameInMBeans;
 
     private boolean useShutdownHook = true;
     private boolean useLoggingForShutdownErrors;
@@ -203,6 +218,7 @@ public class BrokerService implements Service {
 
     private int offlineDurableSubscriberTimeout = -1;
     private int offlineDurableSubscriberTaskSchedule = 300000;
+    private DestinationFilter virtualConsumerDestinationFilter;
 
     static {
         String localHostName = "localhost";
@@ -440,16 +456,16 @@ public class BrokerService implements Service {
     }
 
     /**
-     * Forces a start of the broker. 
-     * By default a BrokerService instance that was 
+     * Forces a start of the broker.
+     * By default a BrokerService instance that was
      * previously stopped using BrokerService.stop() cannot be restarted
-     * using BrokerService.start(). 
-     * This method enforces a restart. 
+     * using BrokerService.start().
+     * This method enforces a restart.
      * It is not recommended to force a restart of the broker and will not work
-     * for most but some very trivial broker configurations. 
+     * for most but some very trivial broker configurations.
      * For restarting a broker instance we recommend to first call stop() on
      * the old instance and then recreate a new BrokerService instance.
-     * 
+     *
      * @param force - if true enforces a restart.
      * @throws Exception
      */
@@ -499,6 +515,7 @@ public class BrokerService implements Service {
             if (isUseJmx()) {
                 startManagementContext();
             }
+
             getPersistenceAdapter().setUsageManager(getProducerSystemUsage());
             getPersistenceAdapter().setBrokerName(getBrokerName());
             LOG.info("Using Persistence Adapter: " + getPersistenceAdapter());
@@ -546,6 +563,7 @@ public class BrokerService implements Service {
             }
             LOG.info("ActiveMQ JMS Message Broker (" + getBrokerName() + ", " + brokerId + ") started");
             getBroker().brokerServiceStarted();
+            checkSystemUsageLimits();
             startedLatch.countDown();
         } catch (Exception e) {
             LOG.error("Failed to start ActiveMQ JMS Message Broker (" + getBrokerName() + ", " + brokerId + "). Reason: " + e, e);
@@ -586,6 +604,10 @@ public class BrokerService implements Service {
 
         LOG.info("ActiveMQ Message Broker (" + getBrokerName() + ", " + brokerId + ") is shutting down");
         removeShutdownHook();
+        if (this.scheduler != null) {
+            this.scheduler.stop();
+            this.scheduler = null;
+        }
         ServiceStopper stopper = new ServiceStopper();
         if (services != null) {
             for (Service service : services) {
@@ -642,10 +664,6 @@ public class BrokerService implements Service {
         if (this.taskRunnerFactory != null) {
             this.taskRunnerFactory.shutdown();
             this.taskRunnerFactory = null;
-        }
-        if (this.scheduler != null) {
-            this.scheduler.stop();
-            this.scheduler = null;
         }
         if (this.executor != null) {
             this.executor.shutdownNow();
@@ -918,9 +936,9 @@ public class BrokerService implements Service {
                 systemUsage.getMemoryUsage().setLimit(1024 * 1024 * 64); // Default
                                                                          // 64
                                                                          // Meg
-                systemUsage.getTempUsage().setLimit(1024L * 1024 * 1024 * 100); // 10
+                systemUsage.getTempUsage().setLimit(1024L * 1024 * 1000 * 50); // 50
                                                                                 // Gb
-                systemUsage.getStoreUsage().setLimit(1024L * 1024 * 1024 * 100); // 100
+                systemUsage.getStoreUsage().setLimit(1024L * 1024 * 1000 * 100); // 100
                                                                                  // GB
                 addService(this.systemUsage);
             }
@@ -1356,7 +1374,7 @@ public class BrokerService implements Service {
     public String getDefaultSocketURIString() {
 
             if (started.get()) {
-                if (this.defaultSocketURIString ==null) {
+                if (this.defaultSocketURIString == null) {
                     for (TransportConnector tc:this.transportConnectors) {
                         String result = null;
                         try {
@@ -1365,10 +1383,19 @@ public class BrokerService implements Service {
                           LOG.warn("Failed to get the ConnectURI for "+tc,e);
                         }
                         if (result != null) {
-                            this.defaultSocketURIString =result;
-                            break;
+                            // find first publishable uri
+                            if (tc.isUpdateClusterClients() || tc.isRebalanceClusterClients()) {
+                                this.defaultSocketURIString = result;
+                                break;
+                            } else {
+                            // or use the first defined
+                                if (this.defaultSocketURIString == null) {
+                                    this.defaultSocketURIString = result;
+                                }
+                            }
                         }
                     }
+
                 }
                 return this.defaultSocketURIString;
             }
@@ -1668,6 +1695,85 @@ public class BrokerService implements Service {
                         "Cannot specify masterConnectorURI when a masterConnector is already registered via the services property");
             } else {
                 addService(new MasterConnector(masterConnectorURI));
+            }
+        }
+    }
+
+    protected void checkSystemUsageLimits() throws IOException {
+        SystemUsage usage = getSystemUsage();
+        long memLimit = usage.getMemoryUsage().getLimit();
+        long jvmLimit = Runtime.getRuntime().maxMemory();
+
+        if (memLimit > jvmLimit) {
+            LOG.error("Memory Usage for the Broker (" + memLimit / (1024 * 1024) +
+                      " mb) is more than the maximum available for the JVM: " +
+                      jvmLimit / (1024 * 1024) + " mb");
+        }
+
+        if (getPersistenceAdapter() != null) {
+            PersistenceAdapter adapter = getPersistenceAdapter();
+            File dir = adapter.getDirectory();
+            if (dir != null) {
+                long storeLimit = usage.getStoreUsage().getLimit();
+                long dirFreeSpace = dir.getFreeSpace();
+                if (storeLimit > dirFreeSpace) {
+                    LOG.warn("Store limit is " + storeLimit / (1024 * 1024) +
+                             " mb, whilst the data directory: " + dir.getAbsolutePath() +
+                             " only has " + dirFreeSpace / (1024 * 1024) + " mb of free space");
+                }
+            }
+
+            long maxJournalFileSize = 0;
+            long storeLimit = usage.getStoreUsage().getLimit();
+
+            if (adapter instanceof KahaDBPersistenceAdapter) {
+                KahaDBPersistenceAdapter kahaDB = (KahaDBPersistenceAdapter) adapter;
+                maxJournalFileSize = kahaDB.getJournalMaxFileLength();
+            } else if (adapter instanceof AMQPersistenceAdapter) {
+                AMQPersistenceAdapter amqAdapter = (AMQPersistenceAdapter) adapter;
+                maxJournalFileSize = amqAdapter.getMaxFileLength();
+            }
+
+            if (storeLimit < maxJournalFileSize) {
+                LOG.error("Store limit is " + storeLimit / (1024 * 1024) +
+                          " mb, whilst the max journal file size for the store is: " +
+                          maxJournalFileSize / (1024 * 1024) + " mb, " +
+                          "the store will not accept any data when used.");
+            }
+        }
+
+        File tmpDir = getTmpDataDirectory();
+        if (tmpDir != null) {
+
+            String tmpDirPath = tmpDir.getAbsolutePath();
+            if (!tmpDir.isAbsolute()) {
+                tmpDir = new File(tmpDirPath);
+            }
+
+            long storeLimit = usage.getTempUsage().getLimit();
+            while (tmpDir != null && tmpDir.isDirectory() == false) {
+                tmpDir = tmpDir.getParentFile();
+            }
+            long dirFreeSpace = tmpDir.getUsableSpace();
+            if (storeLimit > dirFreeSpace) {
+                LOG.error("Temporary Store limit is " + storeLimit / (1024 * 1024) +
+                          " mb, whilst the temporary data directory: " + tmpDirPath +
+                          " only has " + dirFreeSpace / (1024 * 1024) + " mb of free space");
+            }
+
+            long maxJournalFileSize;
+
+            if (usage.getTempUsage().getStore() != null) {
+                maxJournalFileSize = usage.getTempUsage().getStore().getJournalMaxFileLength();
+            } else {
+                maxJournalFileSize = org.apache.kahadb.journal.Journal.DEFAULT_MAX_FILE_LENGTH;
+            }
+
+            if (storeLimit < maxJournalFileSize) {
+                LOG.error("Temporary Store limit is " + storeLimit / (1024 * 1024) +
+                          " mb, whilst the max journal file size for the temporary store is: " +
+                          maxJournalFileSize / (1024 * 1024) + " mb, " +
+                          "the temp store will not accept any data when used.");
             }
         }
     }
@@ -2061,6 +2167,9 @@ public class BrokerService implements Service {
                 getBroker().addDestination(adminConnectionContext, destination,true);
             }
         }
+        if (isUseVirtualTopics()) {
+            startVirtualConsumerDestinations();
+        }
     }
 
     /**
@@ -2228,37 +2337,71 @@ public class BrokerService implements Service {
          }
     }
 
-    /**
-     * Starts all destiantions in persistence store. This includes all inactive
-     * destinations
-     */
-    protected void startDestinationsInPersistenceStore(Broker broker) throws Exception {
-        Set destinations = destinationFactory.getDestinations();
-        if (destinations != null) {
-            Iterator iter = destinations.iterator();
-            ConnectionContext adminConnectionContext = broker.getAdminConnectionContext();
-            if (adminConnectionContext == null) {
-                ConnectionContext context = new ConnectionContext();
-                context.setBroker(broker);
-                adminConnectionContext = context;
-                broker.setAdminConnectionContext(adminConnectionContext);
-            }
-            while (iter.hasNext()) {
-                ActiveMQDestination destination = (ActiveMQDestination) iter.next();
-                broker.addDestination(adminConnectionContext, destination,false);
+    protected void startVirtualConsumerDestinations() throws Exception {
+        ConnectionContext adminConnectionContext = getAdminConnectionContext();
+        Set<ActiveMQDestination> destinations = destinationFactory.getDestinations();
+        DestinationFilter filter = getVirtualTopicConsumerDestinationFilter();
+        if (!destinations.isEmpty()) {
+            for (ActiveMQDestination destination : destinations) {
+                if (filter.matches(destination) == true) {
+                    broker.addDestination(adminConnectionContext, destination, false);
+                }
             }
         }
     }
 
+    private DestinationFilter getVirtualTopicConsumerDestinationFilter() {
+        // created at startup, so no sync needed
+        if (virtualConsumerDestinationFilter == null) {
+            Set <ActiveMQQueue> consumerDestinations = new HashSet<ActiveMQQueue>();
+            for (DestinationInterceptor interceptor : destinationInterceptors) {
+                if (interceptor instanceof VirtualDestinationInterceptor) {
+                    VirtualDestinationInterceptor virtualDestinationInterceptor = (VirtualDestinationInterceptor) interceptor;
+                    for (VirtualDestination virtualDestination: virtualDestinationInterceptor.getVirtualDestinations()) {
+                        if (virtualDestination instanceof VirtualTopic) {
+                            consumerDestinations.add(new ActiveMQQueue(((VirtualTopic) virtualDestination).getPrefix() + DestinationFilter.ANY_DESCENDENT));
+                        }
+                    }
+                }
+            }
+            ActiveMQQueue filter = new ActiveMQQueue();
+            filter.setCompositeDestinations(consumerDestinations.toArray(new ActiveMQDestination[]{}));
+            virtualConsumerDestinationFilter = DestinationFilter.parseFilter(filter);
+        }
+        return virtualConsumerDestinationFilter;
+    }
+
     protected synchronized ThreadPoolExecutor getExecutor() {
         if (this.executor == null) {
-        this.executor = new ThreadPoolExecutor(1, 10, 30, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(), new ThreadFactory() {
-            public Thread newThread(Runnable runnable) {
-                Thread thread = new Thread(runnable, "Usage Async Task");
-                thread.setDaemon(true);
-                return thread;
-            }
-        });
+            this.executor = new ThreadPoolExecutor(1, 10, 60, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(), new ThreadFactory() {
+
+                private long i = 0;
+
+                @Override
+                public Thread newThread(Runnable runnable) {
+                    this.i++;
+                    Thread thread = new Thread(runnable, "BrokerService.worker." + this.i);
+                    thread.setDaemon(true);
+                    thread.setUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+                        @Override
+                        public void uncaughtException(final Thread t, final Throwable e) {
+                            LOG.error("Error in thread '{}'", t.getName(), e);
+                        }
+                    });
+                    return thread;
+                }
+            }, new RejectedExecutionHandler() {
+                @Override
+                public void rejectedExecution(final Runnable r, final ThreadPoolExecutor executor) {
+                    try {
+                        executor.getQueue().offer(r, 60, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        throw new RejectedExecutionException("Interrupted waiting for BrokerService.worker");
+                    }
+
+                    throw new RejectedExecutionException("Timed Out while attempting to enqueue Task.");
+                }
+            });
         }
         return this.executor;
     }
@@ -2460,6 +2603,24 @@ public class BrokerService implements Service {
         this.useAuthenticatedPrincipalForJMSXUserID = useAuthenticatedPrincipalForJMSXUserID;
     }
 
+    /**
+     * Should MBeans that support showing the Authenticated User Name information have this
+     * value filled in or not.
+     *
+     * @return true if user names should be exposed in MBeans
+     */
+    public boolean isPopulateUserNameInMBeans() {
+        return this.populateUserNameInMBeans;
+    }
+
+    /**
+     * Sets whether Authenticated User Name information is shown in MBeans that support this field.
+     * @param true if MBeans should expose user name information.
+     */
+    public void setPopulateUserNameInMBeans(boolean value) {
+        this.populateUserNameInMBeans = value;
+    }
+
     public boolean isNetworkConnectorStartAsync() {
         return networkConnectorStartAsync;
     }
@@ -2498,5 +2659,10 @@ public class BrokerService implements Service {
 
     public void setOfflineDurableSubscriberTaskSchedule(int offlineDurableSubscriberTaskSchedule) {
         this.offlineDurableSubscriberTaskSchedule = offlineDurableSubscriberTaskSchedule;
+    }
+
+    public boolean shouldRecordVirtualDestination(ActiveMQDestination destination) {
+        return isUseVirtualTopics() && destination.isQueue() &&
+                getVirtualTopicConsumerDestinationFilter().matches(destination);
     }
 }

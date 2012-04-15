@@ -113,7 +113,10 @@ public class LegacyFrameTranslator implements FrameTranslator {
                 }
             } else {
                 ActiveMQTextMessage msg = (ActiveMQTextMessage)message.copy();
-                command.setContent(msg.getText().getBytes("UTF-8"));
+                String messageText = msg.getText();
+                if (messageText != null) {
+                    command.setContent(msg.getText().getBytes("UTF-8"));
+                }
             }
 
         } else if (message.getDataStructureType() == ActiveMQBytesMessage.DATA_STRUCTURE_TYPE) {
@@ -167,7 +170,7 @@ public class LegacyFrameTranslator implements FrameTranslator {
         return buffer.toString();
     }
 
-    public ActiveMQDestination convertDestination(ProtocolConverter converter, String name) throws ProtocolException {
+    public ActiveMQDestination convertDestination(ProtocolConverter converter, String name, boolean forceFallback) throws ProtocolException {
         if (name == null) {
             return null;
         } else if (name.startsWith("/queue/")) {
@@ -187,14 +190,16 @@ public class LegacyFrameTranslator implements FrameTranslator {
         } else if (name.startsWith("/temp-topic/")) {
             return converter.createTempDestination(name, true);
         } else {
-            try {
-                ActiveMQDestination fallback = ActiveMQDestination.getUnresolvableDestinationTransformer().transform(name);
-                if (fallback != null) {
-                    return fallback;
+            if (forceFallback) {
+                try {
+                    ActiveMQDestination fallback = ActiveMQDestination.getUnresolvableDestinationTransformer().transform(name);
+                    if (fallback != null) {
+                        return fallback;
+                    }
+                } catch (JMSException e) {
+                    throw new ProtocolException("Illegal destination name: [" + name + "] -- ActiveMQ STOMP destinations "
+                            + "must begin with one of: /queue/ /topic/ /temp-queue/ /temp-topic/", false, e);
                 }
-            } catch (JMSException e) {
-                 throw new ProtocolException("Illegal destination name: [" + name + "] -- ActiveMQ STOMP destinations "
-                                        + "must begin with one of: /queue/ /topic/ /temp-queue/ /temp-topic/", false, e);
             }
             throw new ProtocolException("Illegal destination name: [" + name + "] -- ActiveMQ STOMP destinations "
                                         + "must begin with one of: /queue/ /topic/ /temp-queue/ /temp-topic/");

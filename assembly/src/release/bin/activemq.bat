@@ -71,7 +71,13 @@ echo.
 
 if "%ACTIVEMQ_BASE%" == "" set ACTIVEMQ_BASE=%ACTIVEMQ_HOME%
 
-if "%ACTIVEMQ_OPTS%" == "" set ACTIVEMQ_OPTS=-Xms256M -Xmx1G -Dorg.apache.activemq.UseDedicatedTaskRunner=true -Djava.util.logging.config.file=logging.properties
+if "%ACTIVEMQ_CONF%" == "" set ACTIVEMQ_CONF=%ACTIVEMQ_HOME%\conf
+
+if "%ACTIVEMQ_DATA%" == "" set ACTIVEMQ_DATA=%ACTIVEMQ_HOME%\data
+
+if "%ACTIVEMQ_TMP%" == "" set ACTIVEMQ_TMP=%ACTIVEMQ_DATA%\tmp
+
+if "%ACTIVEMQ_OPTS%" == "" set ACTIVEMQ_OPTS=-Xms1G -Xmx1G -Djava.util.logging.config.file=logging.properties
 
 if "%SUNJMX%" == "" set SUNJMX=-Dcom.sun.management.jmxremote
 REM set SUNJMX=-Dcom.sun.management.jmxremote.port=1099 -Dcom.sun.management.jmxremote.authenticate=false -Dcom.sun.management.jmxremote.ssl=false
@@ -82,11 +88,11 @@ REM SET ACTIVEMQ_DEBUG_OPTS="-agentlib:yjpagent"
 REM Uncomment to enable remote debugging
 REM SET ACTIVEMQ_DEBUG_OPTS=-Xdebug -Xnoagent -Djava.compiler=NONE -Xrunjdwp:transport=dt_socket,server=y,suspend=n,address=5005
 
-REM Setup ActiveMQ Classpath. 
+REM Setup ActiveMQ Classpath.
 REM Add instance conf dir before AMQ install conf dir to pick up instance-specific classpath entries first
-set ACTIVEMQ_CLASSPATH=%ACTIVEMQ_BASE%/conf;%ACTIVEMQ_HOME%/conf;%ACTIVEMQ_CLASSPATH%
+set ACTIVEMQ_CLASSPATH=%ACTIVEMQ_CONF%;%ACTIVEMQ_BASE%/conf;%ACTIVEMQ_HOME%/conf;%ACTIVEMQ_CLASSPATH%
 
-"%_JAVACMD%" %SUNJMX% %ACTIVEMQ_DEBUG_OPTS% %ACTIVEMQ_OPTS% %SSL_OPTS% -Dactivemq.classpath="%ACTIVEMQ_CLASSPATH%" -Dactivemq.home="%ACTIVEMQ_HOME%" -Dactivemq.base="%ACTIVEMQ_BASE%" -jar "%ACTIVEMQ_HOME%/bin/run.jar" start %*
+"%_JAVACMD%" %SUNJMX% %ACTIVEMQ_DEBUG_OPTS% %ACTIVEMQ_OPTS% %SSL_OPTS% -Dactivemq.classpath="%ACTIVEMQ_CLASSPATH%" -Dactivemq.home="%ACTIVEMQ_HOME%" -Dactivemq.base="%ACTIVEMQ_BASE%" -Dactivemq.conf="%ACTIVEMQ_CONF%" -Dactivemq.data="%ACTIVEMQ_DATA%" -Djava.io.tmpdir="%ACTIVEMQ_TMP%" -jar "%ACTIVEMQ_HOME%/bin/run.jar" start %*
 
 goto end
 

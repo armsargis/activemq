@@ -16,31 +16,41 @@
  */
 package org.apache.activemq.broker.jmx;
 
-import javax.jms.InvalidSelectorException;
+import java.io.IOException;
+import java.util.Set;
 
+import javax.jms.InvalidSelectorException;
+import javax.management.ObjectName;
+
+import org.apache.activemq.broker.BrokerService;
+import org.apache.activemq.broker.ConnectionContext;
 import org.apache.activemq.broker.region.Subscription;
 import org.apache.activemq.command.ActiveMQDestination;
-import org.apache.activemq.command.ConsumerInfo;
 import org.apache.activemq.command.ActiveMQQueue;
 import org.apache.activemq.command.ActiveMQTopic;
+import org.apache.activemq.command.ConsumerInfo;
 import org.apache.activemq.filter.DestinationFilter;
+import org.apache.activemq.util.IOExceptionSupport;
+import org.apache.activemq.util.JMXSupport;
 
 /**
- * 
+ *
  */
 public class SubscriptionView implements SubscriptionViewMBean {
 
     protected final Subscription subscription;
     protected final String clientId;
+    protected final String userName;
 
     /**
      * Constructor
-     * 
+     *
      * @param subs
      */
-    public SubscriptionView(String clientId, Subscription subs) {
+    public SubscriptionView(String clientId, String userName, Subscription subs) {
         this.clientId = clientId;
         this.subscription = subs;
+        this.userName = userName;
     }
 
     /**
@@ -48,6 +58,44 @@ public class SubscriptionView implements SubscriptionViewMBean {
      */
     public String getClientId() {
         return clientId;
+    }
+
+    /**
+     * @returns the ObjectName of the Connection that created this subscription
+     */
+    public ObjectName getConnection() {
+        ObjectName result = null;
+
+        if (clientId != null && subscription != null) {
+            ConnectionContext ctx = subscription.getContext();
+            if (ctx != null && ctx.getBroker() != null && ctx.getBroker().getBrokerService() != null) {
+                BrokerService service = ctx.getBroker().getBrokerService();
+                ManagementContext managementCtx = service.getManagementContext();
+                if (managementCtx != null) {
+
+                    try {
+                        ObjectName query = createConnectionQueury(managementCtx, service.getBrokerName());
+                        Set<ObjectName> names = managementCtx.queryNames(query, null);
+                        if (names.size() == 1) {
+                            result = names.iterator().next();
+                        }
+                    } catch (Exception e) {
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    private ObjectName createConnectionQueury(ManagementContext ctx, String brokerName) throws IOException {
+        try {
+            return new ObjectName(ctx.getJmxDomainName() + ":" + "BrokerName="
+                                  + JMXSupport.encodeObjectNamePart(brokerName) + ","
+                                  + "Type=Connection," + "ConnectorName=*,"
+                                  + "Connection=" + JMXSupport.encodeObjectNamePart(clientId));
+        } catch (Throwable e) {
+            throw IOExceptionSupport.create(e);
+        }
     }
 
     /**
@@ -236,7 +284,7 @@ public class SubscriptionView implements SubscriptionViewMBean {
     public int getDispatchedQueueSize() {
         return subscription != null ? subscription.getDispatchedQueueSize() : 0;
     }
-    
+
     public int getMessageCountAwaitingAcknowledge() {
         return getDispatchedQueueSize();
     }
@@ -308,5 +356,10 @@ public class SubscriptionView implements SubscriptionViewMBean {
     @Override
     public boolean isSlowConsumer() {
         return subscription.isSlowConsumer();
+    }
+
+    @Override
+    public String getUserName() {
+        return userName;
     }
 }
